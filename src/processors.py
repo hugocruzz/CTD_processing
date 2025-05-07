@@ -3,7 +3,7 @@
 import numpy as np
 import pandas as pd
 import gsw
-from config import CTD_MAPPINGS, SITE_CONFIG
+from config import COLUMN_MAPPINGS, SITE_CONFIG
 import pandas as pd
 import numpy as np
 import seawater as sw
@@ -140,40 +140,79 @@ def conductivity_to_salinity_unesco(conductivity, temperature=15):
          a5 * R**2.5)
 
     return S
+
 def get_parameter_name(ctd_type: str, param_type: str, standardized: bool = True) -> str:
     """
     Get parameter name for given CTD type and parameter type.
     
     Args:
-        ctd_type: Type of CTD ('idronaut' or 'seabird')
+        ctd_type: Type of CTD ('idronaut', 'seabird', etc.)
         param_type: Parameter to look up (e.g., 'conductivity')
         standardized: If True, return standardized name instead of raw name
         
     Returns:
         str: Column name (raw or standardized based on flag)
     """
-    for raw_name, param in CTD_MAPPINGS[ctd_type].items():
-        if param.parameter and param.parameter.standard_name == param_type:
-            return param.get_mapped_name() if standardized else raw_name
+    ctd_type = ctd_type.lower()
+    
+    # Common parameter mappings to standardized column names
+    PARAM_MAPPING = {
+        'conductivity': 'conductivity_mS_per_m',
+        'pressure': 'pressure_dbar',
+        'temperature': 'temperature_C',
+        'salinity': 'salinity_psu',
+        'oxygen_saturation': 'oxygen_saturation_percent',
+        'oxygen_concentration': 'oxygen_concentration_ml_per_L',
+        'depth': 'depth_m',
+        'ph': 'ph',
+        'turbidity': 'turbidity_NTU',
+        'PAR': 'PAR'
+    }
+    
+    # If looking for standardized name and it's a common parameter, return directly
+    if standardized and param_type in PARAM_MAPPING:
+        return PARAM_MAPPING[param_type]
+    
+    # Otherwise search in mappings
+    if not standardized:
+        # Looking for raw name based on standardized name
+        for raw_name, (std_name, _) in COLUMN_MAPPINGS[ctd_type].items():
+            if param_type.lower() in std_name.lower():
+                return raw_name
+    else:
+        # Try partial match on standardized names
+        for raw_name, (std_name, _) in COLUMN_MAPPINGS[ctd_type].items():
+            if param_type.lower() in std_name.lower():
+                return std_name
+    
     return None
 
 def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.DataFrame:
     """Remove air measurements and apply corrections."""
     ctd_type = ctd_type.lower()
+    
     # Set threshold_cond based on ctd_type
-    if threshold_cond is None:  # Allow overriding via function argument
+    if threshold_cond is None:
         threshold_cond = 5 if ctd_type == "exo" else 0.15
 
-    # Get standardized column names (as they appear after reader standardization)
-    cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
-    pres_col = get_parameter_name(ctd_type, 'pressure', standardized=True)
-    o2_col = get_parameter_name(ctd_type, 'oxygen_saturation', standardized=True)
-    par_col = get_parameter_name(ctd_type, 'PAR', standardized=True)  # Assuming PAR is mapped
-
+    # Get standardized column names directly
+    cond_col = 'conductivity_mS_per_m'
+    pres_col = 'pressure_dbar'
+    o2_col = 'oxygen_saturation_percent'
+    par_col = 'PAR_umol_m2_s'
+    # Check if columns exist, fall back to parameter lookup if not
+    if cond_col not in df.columns:
+        cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
+    if pres_col not in df.columns:
+        pres_col = get_parameter_name(ctd_type, 'pressure', standardized=True)
+    if o2_col not in df.columns:
+        o2_col = get_parameter_name(ctd_type, 'oxygen_saturation', standardized=True)
+    if par_col not in df.columns:
+        par_col = get_parameter_name(ctd_type, 'PAR', standardized=True)
     if not all([cond_col, pres_col, o2_col]):
         raise ValueError(
             f"Missing required columns for CTD type {ctd_type}\n"
-            f"Looking for: conductivity, pressure, oxygen_saturation\n"
+            f"Looking for: conductivity_mS_per_m, pressure_dbar, oxygen_saturation_percent\n"
             f"Found columns: {df.columns.tolist()}"
         )
     
@@ -181,29 +220,36 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
     print(f"Processing columns: {cond_col}, {pres_col}, {o2_col}")
     
     # Process data using standardized column names
-    df_air = df[df[cond_col]< threshold_cond]
-    ctd_pres_offset = df_air[pres_col].median()
-    ctd_O2_offset = df_air[o2_col].median() - 100
-    if np.abs(ctd_O2_offset) > 50:
-        ctd_O2_offset = 0
-        print("Error with offsetting Oxygen data with air, the oxygen in the air is badly measured ")
+    df_air = df[df[cond_col] < threshold_cond]
+    
     if df_air.empty:
         print("No air data found, skipping corrections")
         return df
-    df_original = df.copy()
+        
+    ctd_pres_offset = df_air[pres_col].median()
+    ctd_O2_offset = df_air[o2_col].median() - 100
+    
+    if np.abs(ctd_O2_offset) > 50:
+        ctd_O2_offset = 0
+        print("Error with offsetting Oxygen data with air, the oxygen in the air is badly measured")
+        
     df = df[df[cond_col] > threshold_cond].copy()
     df[pres_col] = df[pres_col] - ctd_pres_offset
     df[o2_col] = df[o2_col] - ctd_O2_offset
-    if df[o2_col].mean()<0:
-        print("Error")
-    #filter df[pres_col] < 0
+    
+    if df[o2_col].mean() < 0:
+        print("Error: Negative mean oxygen saturation after correction")
+        
+    # Filter df[pres_col] < 0
     df = df[df[pres_col] > 0].copy()
+    
     # Calculate PAR average in the air
-    if "PAR" in df_air.columns:
-        par_avg_air = df_air["PAR"].mean()
+    if par_col in df_air.columns:
+        par_avg_air = df_air[par_col].mean()
         df['PAR_avg_air'] = par_avg_air
     else:
         print("PAR column is missing in the air data.")
+        
     return df
 
 def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
@@ -217,8 +263,6 @@ def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     Returns:
         DataFrame with added 'is_downcast' column
     """
-    ctd_type = ctd_type.lower()
-    
     # Check for depth or pressure in standardized column names
     if 'depth_m' in df.columns:
         depth_col = 'depth_m'
@@ -227,12 +271,9 @@ def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     
     if depth_col not in df.columns:
         raise ValueError(
-            f"Could not find depth or pressure column for CTD type {ctd_type}\n"
+            f"Could not find depth or pressure column\n"
             f"Available columns: {df.columns.tolist()}"
         )
-    
-    # Add debug print
-    print(f"Using column {depth_col} to identify downcast")
     
     max_depth_idx = df[depth_col].idxmax()
     df["is_downcast"] = df.index <= max_depth_idx
@@ -241,12 +282,23 @@ def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
 
 def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     """Apply quality control to pH measurements."""
-    ph_param = next((param for param in CTD_MAPPINGS[ctd_type].values() 
-                    if param.standard_name == 'ph'), None)
-    if ph_param:
-        ph_col = ph_param.raw_name
-        if ph_col in df.columns:
-            df.loc[(df[ph_col] < 6) | (df[ph_col] > 9), ph_col] = np.nan
+    # Use direct column name
+    ph_col = 'ph'
+    
+    # Check if pH column exists - first try direct match
+    if ph_col in df.columns:
+        df.loc[(df[ph_col] < 6) | (df[ph_col] > 9), ph_col] = np.nan
+        return df
+    
+    # Try to find pH column using COLUMN_MAPPINGS if direct match failed
+    ctd_type = ctd_type.lower()
+    for raw_name, (std_name, _) in COLUMN_MAPPINGS[ctd_type].items():
+        if 'ph' == std_name.lower():
+            if raw_name in df.columns:
+                df.loc[(df[raw_name] < 6) | (df[raw_name] > 9), raw_name] = np.nan
+                print(f"Applied pH quality check to column: {raw_name}")
+                break
+    
     return df
 
 
@@ -336,14 +388,51 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     """Calculate oceanographic parameters."""
     ctd_type = ctd_type.lower()
     
-    # Get standardized parameter names
-    pres_col = get_parameter_name(ctd_type, 'pressure', standardized=True)
-    temp_col = get_parameter_name(ctd_type, 'temperature', standardized=True)
-    sal_col = get_parameter_name(ctd_type, 'salinity', standardized=True)
-    o2_col = get_parameter_name(ctd_type, 'oxygen_saturation', standardized=True)
-    cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
+    # Use direct column names
+    pres_col = 'pressure_dbar'
+    temp_col = 'temperature_C'
+    cond_col = 'conductivity_mS_per_m'
+    sal_col = 'salinity_psu'
+    o2_col = 'oxygen_saturation_percent'
+    
+    # Check columns exist
+    missing_cols = []
+    for col in [pres_col, temp_col, cond_col, sal_col]:
+        if col not in df.columns:
+            missing_cols.append(col)
+    
+    if missing_cols:
+        print(f"Warning: Missing columns {missing_cols}. Trying to find alternative columns.")
+        for col in missing_cols:
+            param_type = col.split('_')[0]  # Extract base parameter name
+            alt_col = get_parameter_name(ctd_type, param_type, standardized=True)
+            if alt_col:
+                print(f"Using {alt_col} instead of {col}")
+                if col == pres_col:
+                    pres_col = alt_col
+                elif col == temp_col:
+                    temp_col = alt_col
+                elif col == cond_col:
+                    cond_col = alt_col
+                elif col == sal_col:
+                    sal_col = alt_col
+    
     # Add debug print
     print(f"Calculating ocean parameters using columns: {pres_col}, {temp_col}, {sal_col}, {o2_col}")
+    
+    # Ensure depth column exists
+    if 'depth_m' not in df.columns:
+        if pres_col in df.columns:
+            # Calculate depth from pressure using GSW
+            try:
+                # Convert pressure to depth (negative values indicate depth below sea level)
+                df['depth_m'] = -gsw.z_from_p(df[pres_col].to_numpy(), SITE_CONFIG['LATITUDE'])
+                print("Depth column calculated from pressure.")
+            except Exception as e:
+                print(f"Error calculating depth from pressure: {e}")
+                df['depth_m'] = np.nan
+        else:
+            raise ValueError("Pressure column is missing, cannot calculate depth.")
     
     # Convert to numpy arrays
     p = df[pres_col].abs().to_numpy()
@@ -410,13 +499,12 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
                 # Replace invalid values with NaN
                 N2 = np.where(np.isfinite(N2), N2, np.nan)
                 
-                # Create a proper index for assignment
-                valid_indices = np.arange(len(p)-1)[unique_mask]
-                if len(valid_indices) == len(N2):
-                    df.iloc[valid_indices, df.columns.get_loc('N2')] = N2
-                else:
-                    print()
-                    #print(f"Warning: N2 calculation produced {len(N2)} values for {len(valid_indices)} positions")
+                # Assign N2 values to the DataFrame
+                if len(N2) == len(pmid):  # Ensure lengths match
+                    # Map N2 values to the closest pressure levels in the original DataFrame
+                    for i, mid_p in enumerate(pmid):
+                        closest_idx = (np.abs(p - mid_p)).argmin()  # Find the closest pressure index
+                        df.at[closest_idx, 'N2'] = N2[i]
                 
     except Exception as e:
         print(f"Warning: Error calculating N2: {e}")
@@ -425,7 +513,7 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     if ctd_type=="seabird":
         #Rename sal_col into sal_col+"_seabird"
         df = df.rename(columns={sal_col: sal_col+"_seabird"})
-        df[sal_col] = sw.salt(cond/42.914, temp, p) #This equation is the one used by the Idronaut CTD
+        df[sal_col] = sw.salt(df[cond_col]/42.914, df[temp_col], df[pres_col]) #This equation is the one used by the Idronaut CTD
 
     return df
 

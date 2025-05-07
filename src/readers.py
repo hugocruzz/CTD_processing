@@ -5,7 +5,7 @@ import json
 import glob
 
 import pandas as pd
-from config import CTD_MAPPINGS, get_column_mapping
+from config import COLUMN_MAPPINGS, get_column_mapping, get_unit_conversion_factor
 # Function to get standardized column name
 class BaseReader:
     """Base class for CTD readers."""
@@ -20,13 +20,13 @@ class BaseReader:
     
 
     def standardize_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Standardize column names based on CTD type.
+        """Standardize column names based on CTD type and apply unit conversions.
         
         Args:
             df: DataFrame with raw column names
             
         Returns:
-            DataFrame with standardized column names
+            DataFrame with standardized column names and units
         """
         try:
             # Get column mapping for this reader type
@@ -39,12 +39,22 @@ class BaseReader:
                 # First try exact match
                 if col in column_mapping:
                     rename_dict[col] = column_mapping[col]
+                    # Apply unit conversion if needed
+                    conversion_factor = get_unit_conversion_factor(col, self.reader_type)
+                    if conversion_factor is not None:
+                        df[col] = df[col] * conversion_factor
+                        print(f"Applied conversion factor {conversion_factor} to column {col}")
                 else:
                     # Try case-insensitive match
                     col_lower = col.lower()
                     for raw_name, std_name in column_mapping.items():
                         if raw_name.lower() == col_lower:
                             rename_dict[col] = std_name
+                            # Apply unit conversion if needed
+                            conversion_factor = get_unit_conversion_factor(raw_name, self.reader_type)
+                            if conversion_factor is not None:
+                                df[col] = df[col] * conversion_factor
+                                print(f"Applied conversion factor {conversion_factor} to column {col}")
                             break
             
             # Apply renaming if any mappings were found
@@ -60,7 +70,7 @@ class BaseReader:
             # Return original dataframe if standardization fails
             return df
 
-    
+
 class IdronautReader(BaseReader):
     """Reader for Idronaut CTD files (.txt)"""
     def read(self) -> pd.DataFrame:
@@ -152,6 +162,92 @@ class SeabirdReader(BaseReader):
         )
         df = self.standardize_columns(df)
         return df
+
+class GF23Reader(BaseReader):
+    """Reader for GF23 CTD files (.txt)"""
+
+    def read(self) -> pd.DataFrame:
+        try:
+            # Read the TXT file
+            df = pd.read_csv(self.filepath, delim_whitespace=True, skiprows=2, header=None)
+
+            # Force the columns to match the expected structure
+            df.columns = [
+                "Depth", "Temperature", "Conductivity", "Oxygen %", "Oxygen mg/L",
+                "pH", "PAR", "Salinity", "SigmaT", "Trx-chl(a)", "Pressure"
+            ]
+
+            # Remove "**" from the dataset
+            df = df.replace(r'\*\*', '', regex=True)
+
+            # Convert all numerical values to float
+            df = df.apply(pd.to_numeric, errors='ignore')
+
+            # Load the activity log
+            logpath = os.path.join(os.path.dirname(self.filepath), "activity_log_ODV.csv")
+            activity_log = pd.read_csv(logpath)
+            activity_log = activity_log[activity_log["Activity"] == "CTD"]
+
+            # Fill missing latitudes with lat.OUT
+            activity_log["lat IN"] = activity_log.apply(
+                lambda row: row["lat OUT"] if row["lat IN"] == "" else row["lat IN"], axis=1
+            )
+
+            # Convert GPS coordinates
+            activity_log["Latitude"] = activity_log["lat IN"].apply(self._convert_gps)
+            activity_log["Longitude"] = activity_log["long IN"].apply(self._convert_gps) * -1
+
+            # Clean and format the activity log
+            activity_log_clean = activity_log[["station_ID", "station_ODV", "date", "Latitude", "Longitude", "time In"]].copy()
+            activity_log_clean.rename(columns={"station_ID": "Station"}, inplace=True)
+
+            # Extract the station name from the file path
+            station_name = os.path.splitext(os.path.basename(self.filepath))[0]
+            df["Station"] = station_name
+
+            # Merge the activity log with the data
+            df = df.merge(activity_log_clean, on="Station", how="left")
+
+            # Add the date as a new variable
+            try:
+                # Handle both two-digit and four-digit year formats
+                df["date"] = pd.to_datetime(df["date"], format="%d.%m.%y", errors="coerce")
+                if df["date"].isnull().any():
+                    # Retry with four-digit year format if parsing fails
+                    df["date"] = pd.to_datetime(df["date"], format="%d.%m.%Y", errors="coerce")
+            except Exception as e:
+                print(f"Error parsing date: {e}")
+                raise
+
+            # Add a datetime column by combining date and time
+            try:
+                df["datetime"] = pd.to_datetime(df["date"].dt.strftime("%Y-%m-%d") + " " + df["time In"])
+            except Exception as e:
+                print(f"Error creating datetime column: {e}")
+                raise
+
+            # Standardize column names using the config.py mappings
+            column_mapping = get_column_mapping(self.reader_type)
+            df.rename(columns=column_mapping, inplace=True)
+
+            # Standardize column names and apply unit conversions
+            df = self.standardize_columns(df)
+
+            return df
+
+        except Exception as e:
+            print(f"Error reading GF23 file {self.filepath}: {e}")
+            raise
+
+    @staticmethod
+    def _convert_gps(string):
+        """Convert GPS coordinates from DMD format to decimal degrees."""
+        import re
+        string_clean = re.sub(r"[’'‘]", "", string).replace(",", ".")
+        degrees = float(string_clean.split("°")[0])
+        minutes = float(string_clean.split("°")[1]) / 60
+        return degrees + minutes
+
 class ExoReader(BaseReader):
     """Reader for exo probe"""
     def __init__(self, filepath: str, reader_type: str):
@@ -361,7 +457,7 @@ class RBRReader(BaseReader):
         # Apply conversions
         for col in df.columns:
             if col in self.units:
-                unit = self.units[col]
+                unit = self.units
                 
                 # Handle conductivity conversions
                 if col == 'Conductivity' and unit == 'mS/cm':
