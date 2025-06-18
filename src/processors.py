@@ -12,90 +12,122 @@ import glob
 import xarray as xr
 
 class CTDFormatter:
-    """Class to format CTD data into A2PS-compatible format."""
+    """Class to format CTD data into A2PS-compatible format, with time integration."""
 
     def __init__(self, split_profile=True):
         self.split_profile = split_profile
 
     def format_folder(self, input_folder, output_folder):
         """
-        Format all CTD files in a folder into A2PS-compatible format.
-
-        Args:
-            input_folder: Folder containing segmented CTD profiles.
-            output_folder: Folder to save formatted files.
+        Format all CTD files in a folder into A2PS-compatible format, preserving subfolder structure.
         """
-        os.makedirs(output_folder, exist_ok=True)
-        ctd_files = glob.glob(os.path.join(input_folder, "*.csv"))
-        if not ctd_files:
-            print(f"No CTD files found in {input_folder}")
-            return
-
-        for ctd_file in ctd_files:
-            print(f"Formatting CTD file: {ctd_file}")
-            self.format_file(ctd_file, output_folder)
+        for root, dirs, files in os.walk(input_folder):
+            rel_path = os.path.relpath(root, input_folder)
+            out_dir = os.path.join(output_folder, rel_path)
+            os.makedirs(out_dir, exist_ok=True)
+            ctd_files = [f for f in files if f.lower().endswith('.csv')]
+            for ctd_file in ctd_files:
+                self.format_file(os.path.join(root, ctd_file), out_dir)
 
     def format_file(self, ctd_file, output_folder):
         """
-        Format a single CTD file into A2PS-compatible format.
-
-        Args:
-            ctd_file: Path to the CTD file.
-            output_folder: Folder to save the formatted file.
+        Format a single CTD file into A2PS-compatible format, with time columns if present.
         """
-        ctd_df = pd.read_csv(ctd_file)
-        ctd_ds = ctd_df.to_xarray()
+        try:
+            ctd_df = pd.read_csv(ctd_file)
+        except Exception as e:
+            print(f"Error reading {ctd_file}: {e}")
+            return
 
-        # Rename and set coordinate
+        # Handle time columns
+        if "timestamp" in ctd_df.columns:
+            ctd_df["timestamp"] = pd.to_datetime(ctd_df["timestamp"])
+            ctd_df = ctd_df.set_index("timestamp")
+            ctd_df = ctd_df.resample("1S").interpolate(method="linear")
+            ctd_df = ctd_df.reset_index()
+            ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%m/%d/%Y")
+            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%H:%M:%S")
+            #Interpolate to new date range of 1 second interval 
+
+            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"]).dt.strftime("%H:%M:%S")
+            ctd_df.drop(columns=["timestamp"], inplace=True)
+        elif "date_mm_dd_yyyy" in ctd_df.columns:
+            #Interpolate to new date range of 1 second interval 
+            ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"], format="%d/%m/%Y")
+            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S")
+            ctd_df = ctd_df.set_index(["date_mm_dd_yyyy", "time_hh_mm_ss"])
+            ctd_df = ctd_df.resample("1S").interpolate(method="linear")
+            ctd_df = ctd_df.reset_index()
+
+            ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"], format="%d/%m/%Y").dt.strftime("%m/%d/%Y")
+            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S").dt.strftime("%H:%M:%S")
+        else:
+            # If no time, force split profile for interpolation
+            self.split_profile = True
+            print("No time columns found, splitting profile for interpolation.")
+
+        ctd_ds = ctd_df.to_xarray()
         ctd_ds = ctd_ds.rename_vars({"pressure_dbar": "Pres"})
         ctd_ds = ctd_ds.swap_dims({'index': 'Pres'})
         ctd_ds = ctd_ds.set_coords('Pres')
         ctd_ds = ctd_ds.drop_vars('index')
-        ctd_ds["Pres"] = ctd_ds["Pres"] * 1.45038  # Convert pressure to psi
+        ctd_ds["Pres"] = ctd_ds["Pres"] * 1.45038  # dbar to psi
 
         if self.split_profile:
-            self._split_and_format(ctd_ds, ctd_file, output_folder)
+            max_pressure_idx = ctd_ds["Pres"].argmax()
+            # Downward
+            downward_ds = ctd_ds.isel(Pres=slice(None, max_pressure_idx.values))
+            downward_df = self._prepare_dataframe(downward_ds)
+            self._save_formatted_file(downward_df, ctd_file, output_folder, "_downward_formatted.asc")
+            # Upward
+            upward_ds = ctd_ds.isel(Pres=slice(max_pressure_idx.values, None))
+            if len(upward_ds.Pres) > 1:
+                upward_df = self._prepare_dataframe(upward_ds)
+                self._save_formatted_file(upward_df, ctd_file, output_folder, "_upward_formatted.asc")
         else:
-            self._format_entire_profile(ctd_ds, ctd_file, output_folder)
+            # Entire profile, include time columns if present
+            formatted_df = self._prepare_dataframe(ctd_ds, include_time=True, sort_by_pressure=False)
+            self._save_formatted_file(formatted_df, ctd_file, output_folder, "_formatted.asc")
 
-    def _split_and_format(self, ctd_ds, ctd_file, output_folder):
-        """Split the profile into downward and upward portions and format them."""
-        max_pressure_idx = ctd_ds["Pres"].argmax()
-
-        # Downward portion
-        downward_ds = ctd_ds.isel(Pres=slice(None, max_pressure_idx.values))
-        downward_df = self._prepare_dataframe(downward_ds)
-        self._save_formatted_file(downward_df, ctd_file, output_folder, suffix="_downward_formatted.asc")
-
-        # Upward portion
-        upward_ds = ctd_ds.isel(Pres=slice(max_pressure_idx.values, None))
-        if len(upward_ds.Pres) > 1:
-            upward_df = self._prepare_dataframe(upward_ds)
-            self._save_formatted_file(upward_df, ctd_file, output_folder, suffix="_upward_formatted.asc")
-
-    def _format_entire_profile(self, ctd_ds, ctd_file, output_folder):
-        """Format the entire profile as a single dataset."""
-        formatted_df = self._prepare_dataframe(ctd_ds)
-        self._save_formatted_file(formatted_df, ctd_file, output_folder, suffix="_formatted.asc")
-
-    def _prepare_dataframe(self, ctd_ds):
-        """Prepare the DataFrame for formatting."""
-        ctd_ds = ctd_ds.rename_vars({
+    def _prepare_dataframe(self, ctd_ds, include_time=False, sort_by_pressure=True):
+        """Prepare DataFrame for A2PS formatting, optionally including time columns."""
+        rename_dict = {
             "temperature_C": "Tv2C",
             "salinity_psu": "Sal2",
             "oxygen_saturation_percent": "Sbeox2PS",
             "Pres": "PrdE"
-        })
-        df = ctd_ds[["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]].to_dataframe()
+        }
+        if include_time:
+            # Add time columns if present
+            if "time_hh_mm_ss" in ctd_ds.variables and "date_mm_dd_yyyy" in ctd_ds.variables:
+                rename_dict["time_hh_mm_ss"] = "hh:mm:ss"
+                rename_dict["date_mm_dd_yyyy"] = "mm/dd/yyyy"
+                columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE", "hh:mm:ss", "mm/dd/yyyy"]
+            else:
+                columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]
+        else:
+            columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]
+
+        ctd_ds = ctd_ds.rename_vars(rename_dict)
+        df = ctd_ds[columns].to_dataframe()
         df.reset_index(drop=True, inplace=True)
-        df = df.drop_duplicates(subset='PrdE', keep='first')
-        df.sort_values(by=["PrdE"], inplace=True)
+        #Drop rows if more than 3 value is NaN
+        df = df.dropna()
+
+        if sort_by_pressure:
+            df = df.drop_duplicates(subset='PrdE', keep='first')
+            df.sort_values(by=["PrdE"], inplace=True)
+        else:
+            df.sort_values(by=["hh:mm:ss"], inplace=True)
         return df
 
     def _save_formatted_file(self, df, ctd_file, output_folder, suffix):
         """Save the formatted DataFrame to a file."""
         formatted_file = os.path.basename(ctd_file).replace(".csv", suffix)
         output_path = os.path.join(output_folder, formatted_file)
+        if "Sbeox2PS" in df.columns and df["Sbeox2PS"].mean() < 0:
+            print("WARNING: Oxygen values are negative, check the data!")
+            print(ctd_file)
         df.to_csv(output_path, sep='\t', index=False)
         print(f"Exported formatted CTD to {output_path}")
 
@@ -109,6 +141,7 @@ def process_raw_data(df, ctd_type):
     df = calculate_ocean_params(df, ctd_type)
     df = identify_downcast(df, ctd_type)
     df = quality_check_ph(df, ctd_type)
+    
     return df
 
 def conductivity_to_salinity_unesco(conductivity, temperature=15):
@@ -479,41 +512,43 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
                 row[o2_col]
             ), axis=1
         )
-
+    '''
     # Calculate N² with proper handling of warnings
     try:
         # Initialize N2 column with NaN
         df['N2'] = np.nan
-        
+
         # Remove duplicate pressure values that can cause division by zero
         unique_mask = np.diff(p) != 0
         if any(unique_mask):  # Only proceed if we have valid differences
             SA_clean = SA[:-1][unique_mask]
             CT_clean = CT[:-1][unique_mask]
             p_clean = p[:-1][unique_mask]
-            
+
             # Calculate N² only for valid data points
             with np.errstate(divide='ignore', invalid='ignore'):
                 N2, pmid = gsw.Nsquared(SA_clean, CT_clean, p_clean)
-                
+
                 # Replace invalid values with NaN
                 N2 = np.where(np.isfinite(N2), N2, np.nan)
-                
-                # Assign N2 values to the DataFrame
-                if len(N2) == len(pmid):  # Ensure lengths match
-                    # Map N2 values to the closest pressure levels in the original DataFrame
-                    for i, mid_p in enumerate(pmid):
-                        closest_idx = (np.abs(p - mid_p)).argmin()  # Find the closest pressure index
+
+                # Assign N2 values to the DataFrame only for valid indexes
+                for i, mid_p in enumerate(pmid):
+                    closest_idx = (np.abs(p - mid_p)).argmin()
+                    # Only assign if closest_idx is a valid index in df
+                    if closest_idx in df.index:
                         df.at[closest_idx, 'N2'] = N2[i]
-                
+
+        # Optionally, drop rows with NaN index (if any were created, which shouldn't happen with this logic)
+        df = df[df.index.notna()]
+
     except Exception as e:
         print(f"Warning: Error calculating N2: {e}")
         df['N2'] = np.nan
-
+    '''
     if ctd_type=="seabird":
         #Rename sal_col into sal_col+"_seabird"
         df = df.rename(columns={sal_col: sal_col+"_seabird"})
         df[sal_col] = sw.salt(df[cond_col]/42.914, df[temp_col], df[pres_col]) #This equation is the one used by the Idronaut CTD
 
     return df
-

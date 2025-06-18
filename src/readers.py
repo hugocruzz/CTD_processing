@@ -43,7 +43,7 @@ class BaseReader:
                     conversion_factor = get_unit_conversion_factor(col, self.reader_type)
                     if conversion_factor is not None:
                         df[col] = df[col] * conversion_factor
-                        print(f"Applied conversion factor {conversion_factor} to column {col}")
+                        print(f"Applied conversion factor {conversion_factor} to column {col} to get {rename_dict[col]}")
                 else:
                     # Try case-insensitive match
                     col_lower = col.lower()
@@ -54,7 +54,7 @@ class BaseReader:
                             conversion_factor = get_unit_conversion_factor(raw_name, self.reader_type)
                             if conversion_factor is not None:
                                 df[col] = df[col] * conversion_factor
-                                print(f"Applied conversion factor {conversion_factor} to column {col}")
+                                print(f"Applied conversion factor {conversion_factor} to column {col} to get {rename_dict[col]}")
                             break
             
             # Apply renaming if any mappings were found
@@ -260,15 +260,43 @@ class ExoReader(BaseReader):
             pd.DataFrame: DataFrame with processed RBR CTD data
         """
         self.df = pd.read_csv(self.filepath, encoding="utf-16", delimiter=",", skiprows=9)
+        # Convert all numeric columns to float, handling any non-numeric entries
+        for column in self.df.columns:
+            # Skip columns that are likely dates or text
+            if any(keyword in column.lower() for keyword in ['date', 'time', 'site', 'station', 'id', 'name', 'comment']):
+                continue
                 
+            # Check if the column appears to be numeric (most values can be converted)
+            sample_values = self.df[column].dropna().head(10)  # Take a sample of the first values
+            if len(sample_values) == 0:
+                continue  # Skip empty columns
+                
+            # Try to determine if column is numeric by checking if most values can be converted
+            numeric_count = 0
+            for val in sample_values:
+                try:
+                    float(val)
+                    numeric_count += 1
+                except (ValueError, TypeError):
+                    pass
+                    
+            # If at least 70% of sample values are numeric, convert the whole column
+            if numeric_count / len(sample_values) >= 0.7:
+                try:
+                    self.df[column] = pd.to_numeric(self.df[column], errors='coerce')
+                    print(f"Converted column '{column}' to numeric")
+                except Exception as e:
+                    print(f"Could not convert column '{column}' to numeric: {e}")
+                
+        #Standardize column names
+        self.df = self.standardize_columns(self.df)
+        
         # Convert conductivity from µS/CM to mS_per_m
         if 'COND µS/CM' in self.df.columns:
             self.df['COND µS/CM'] = self.df['COND µS/CM'] * 0.1  # µS/CM to mS_per_m
             self.df.rename(columns={'COND µS/CM': 'conductivity_mS_per_m'}, inplace=True)
             print("Converted 'COND µS/CM' to 'conductivity_mS_per_m'")
         
-        #Standardize column names
-        self.df = self.standardize_columns(self.df)
         return self.df
         
 class RBRReader(BaseReader):

@@ -46,10 +46,11 @@ def process_folder(ctd_base, subfolder_path, output_base, split_profile=True):
             ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%m/%d/%Y")
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%H:%M:%S")
             ctd_df.drop(columns=["timestamp"], inplace=True)
-        else:
+        elif "date_mm_dd_yyyy" in ctd_df.columns:
             ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"], format="%d/%m/%Y").dt.strftime("%m/%d/%Y")
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S").dt.strftime("%H:%M:%S")
-            
+        else:
+            split_profile = True #Split profile to be able to interpolate by depth
 
         ctd_ds = ctd_df.to_xarray()
         # Rename and set coordinate
@@ -161,7 +162,7 @@ def find_all_folders_with_csv(base_path):
         
 def main():
     # Base paths; modify if needed
-    campaign_name = "LacNOX"  # Change as needed
+    campaign_name = "LacNOX/20250408_Lexplore_spatial/"  # Change as needed
     #campaign_name = "SubOcean++"
     ctd_path = f"C:/Users/cruz/Documents/SENSE/CTD_processing/data/Level2/{campaign_name}"
     output_folder = f"C:/Users/cruz/Documents/SENSE/CTD_processing/data/a2ps_format/{campaign_name}"

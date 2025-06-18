@@ -108,13 +108,20 @@ def generate_profile_filename(profile_df: pd.DataFrame, source_filepath: str, in
     
     return f"{base_name}_{index + 1}.csv"
 
-def extract_profiles_from_data(df: pd.DataFrame, source_filepath: str) -> List[Tuple[pd.DataFrame, str]]:
+def extract_profiles_from_data(
+    df: pd.DataFrame,
+    source_filepath: str,
+    add_cast_name: bool = False,
+    cast_name_col: str = "Cast_name"
+) -> List[Tuple[pd.DataFrame, str]]:
     """
     Extract profiles from data and create filenames.
     
     Args:
         df: DataFrame containing CTD data
         source_filepath: Original source file path
+        add_cast_name: If True, add a Cast_name column to each profile
+        cast_name_col: Name of the column to use for cast name
         
     Returns:
         List of tuples (profile_df, profile_filename)
@@ -135,9 +142,41 @@ def extract_profiles_from_data(df: pd.DataFrame, source_filepath: str) -> List[T
         numeric_cols = profile_df.select_dtypes(include=['number', 'float', 'int']).columns
         profile_df[numeric_cols] = profile_df[numeric_cols].apply(pd.to_numeric, errors='coerce')
         
+        # Optionally add Cast_name column
+        if add_cast_name:
+            base_name = os.path.splitext(os.path.basename(source_filepath))[0]
+            profile_df[cast_name_col] = f"{base_name}_{i + 1}"
+        
         # Generate filename
         profile_filename = generate_profile_filename(profile_df, source_filepath, i)
         
         result.append((profile_df, profile_filename))
         
     return result
+
+def deduce_cast_number(df: pd.DataFrame, source_filepath: str) -> int:
+    """
+    Deduce the cast number for the given DataFrame using the segmentation algorithm.
+    Returns the cast index (starting from 0) for this segment in the file.
+    If the whole file is a single profile, returns 0.
+    """
+    from main import segment_profiles  # Avoid circular import at top
+    if 'pressure_dbar' not in df.columns:
+        return 0
+    profiles = segment_profiles(df['pressure_dbar'], prominence=10, distance=50)
+    # Find which segment matches the current df
+    for idx, (start, end) in enumerate(profiles):
+        segment = df.iloc[start:end + 1]
+        # If the segment is the same length and has the same index range, it's a match
+        if segment.index.equals(df.index):
+            return idx
+    # If not found, default to 0
+    return 0
+
+def assign_cast_name_column(df: pd.DataFrame, source_filepath: str, index: int = 0, cast_name_col: str = "Cast_name") -> pd.DataFrame:
+    """
+    Assign a Cast_name column to the DataFrame based on the source file and index.
+    """
+    base_name = os.path.splitext(os.path.basename(source_filepath))[0]
+    df[cast_name_col] = f"{base_name}_{index + 1}"
+    return df

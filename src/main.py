@@ -8,6 +8,9 @@ from processors import process_raw_data
 from visualize import create_profile_plot
 from processors import process_raw_data, CTDFormatter
 import shutil
+
+from utils import assign_cast_name_column, deduce_cast_number
+
 from utils import (find_files_by_extension, save_profile, 
                   generate_profile_filename, extract_profiles_from_data)
 from datetime import datetime
@@ -131,10 +134,13 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
 
     # Extract profiles based on processing mode
     if processing_mode == "segment":
-        profiles_data = extract_profiles_from_data(df, filepath)
+        profiles_data = extract_profiles_from_data(df, filepath, add_cast_name=True)
     else:
-        # For None or "concatenate", treat entire file as one profile
+        # Deduce cast number using segmentation algorithm
+        cast_index = deduce_cast_number(df, filepath)
         profile_filename = os.path.splitext(os.path.basename(filepath))[0]
+        # Assign Cast_name using the deduced cast index
+        df = assign_cast_name_column(df, filepath, index=cast_index)
         profiles_data = [(df, profile_filename)]
 
     if not profiles_data:
@@ -153,7 +159,6 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
         print(f"Processed profile {i + 1} saved to {level2_path}")
 
     return df, filepath  # Return the dataframe for potential concatenation
-
 
 def get_ctd_type(filename: str) -> str:
     """
@@ -174,8 +179,8 @@ def get_ctd_type(filename: str) -> str:
         return 'seabird'
     elif extension == '.txt' and 'idronaut' in filename.lower():
         return 'idronaut'
-    elif extension == '.txt' and ('_data' in filename.lower() and ('rbr' in os.path.dirname(filename).lower())):
-        return 'rbr'
+    elif extension == '.txt' and ('_data' in filename.lower()):
+            return 'rbr'
     elif extension == ".csv" and "kor" in filename.lower():
         return 'exo'
     elif extension == ".txt" and ".TXT" in os.path.basename(filename):
@@ -185,16 +190,9 @@ def get_ctd_type(filename: str) -> str:
     else:
         return None
     
-def process_all_files(directory: str, Level1_output, Level2_output, Level2B_output, processing_mode=None) -> None:
+def process_all_files(directory: str, Level1_output, Level2_output, Level2B_output, processing_mode=None, split_profile=False) -> None:
     """
     Process all CTD files in directory.
-    
-    Args:
-        directory: Directory containing CTD files
-        Level1_output: Output directory for Level1 data
-        Level2_output: Output directory for Level2 data
-        Level2B_output: Output directory for Level2B data
-        processing_mode: "concatenate", "segment", or None (default processing)
     """
     print(f"Replicating directory structure from {directory} to {Level1_output}")
 
@@ -257,10 +255,17 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
             level1_path = save_profile(concatenated_df, Level1_output, concat_filename)
             print(f"Saved concatenated profile to {level1_path}")
 
-            # Process and save concatenated data to Level2
-            processed_df = process_raw_data(concatenated_df, ctd_type)
+            profiles_data = extract_profiles_from_data(concatenated_df, concat_filename, add_cast_name=True)
+            processed_profiles = []
+            for profile_df, _ in profiles_data:
+                processed_profiles.append(process_raw_data(profile_df, ctd_type))
+            processed_df = pd.concat(processed_profiles, ignore_index=True)
+
             level2_path = save_profile(processed_df, Level2_output, concat_filename)
             print(f"Processed concatenated profile saved to {level2_path}")
+        # After Level2 files are created, format for A2PS:
+        formatter = CTDFormatter(split_profile=split_profile)
+        formatter.format_folder(Level2_output, Level2B_output)
     else:
         # Process files individually
         for file in all_files:
@@ -270,15 +275,22 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
                 continue
             print(f"Processing {file} as {ctd_type}")
             process_ctd_file(file, ctd_type, directory, Level1_output, Level2_output, Level2B_output, processing_mode)
+        # After all Level2 files are created, format for A2PS:
+        formatter = CTDFormatter(split_profile=split_profile)
+        formatter.format_folder(Level2_output, Level2B_output)
 
 if __name__ == "__main__":
-    #campaign = "LacNOX/"
+    #
+    campaign = "LacNOX/20250408_Lexplore_spatial/"
+    campaign = "LacNOX/20251405_LExplore/"
+    campaign = "LacNOX/20250320_Camp-1/"
     #campaign = "Forel/"
     #campaign = "Greenfjord 2023\casts"
-    campaign  =  "Forel"
-    campaign  =  "Sanna"
-    #data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
-    data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
+    #campaign  =  "Forel"
+    #campaign  =  "Sanna"
+    campaign = "LacNOX/20250617_LExplore"
+    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
+    #data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
     Level1_output = os.path.join("data", "Level1", campaign) 
     Level2_output = os.path.join("data", "Level2", campaign)
     Level2B_output = os.path.join("data", "Level2B", campaign)
@@ -287,9 +299,10 @@ if __name__ == "__main__":
     # - "concatenate": Combine all profiles by day and CTD type
     # - "segment": Extract multiple profiles from each file (as before)
     # - None: Process each file as a single profile
-    processing_mode = "concatenate"  # Change as needed
-    processing_mode=  None
-    process_all_files(data_dir, Level1_output, Level2_output, Level2B_output, processing_mode)
+    #processing_mode = "concatenate"  # Change as needed
+    processing_mode =  None  # Change as needed
+    split_profile = False  # Set to True if you want to split profiles into upward/downward
+    process_all_files(data_dir, Level1_output, Level2_output, Level2B_output, processing_mode,split_profile)
     
     print("\nProfile processing complete!")
     print("To organize profiles by station, run match_profiles.py separately.")
