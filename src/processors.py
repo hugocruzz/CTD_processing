@@ -67,7 +67,23 @@ class CTDFormatter:
             print("No time columns found, splitting profile for interpolation.")
 
         ctd_ds = ctd_df.to_xarray()
-        ctd_ds = ctd_ds.rename_vars({"pressure_dbar": "Pres"})
+        
+        # Find pressure column - try different possible names
+        pressure_col = None
+        for col_name in ["pressure_dbar", "Pres", "pressure", "Press"]:
+            if col_name in ctd_ds.variables:
+                pressure_col = col_name
+                break
+        
+        if pressure_col is None:
+            print(f"Warning: No pressure column found in {ctd_file}")
+            print(f"Available columns: {list(ctd_ds.variables.keys())}")
+            return
+            
+        # Rename pressure column to "Pres" if it's not already named that
+        if pressure_col != "Pres":
+            ctd_ds = ctd_ds.rename_vars({pressure_col: "Pres"})
+        
         ctd_ds = ctd_ds.swap_dims({'index': 'Pres'})
         ctd_ds = ctd_ds.set_coords('Pres')
         ctd_ds = ctd_ds.drop_vars('index')
@@ -233,6 +249,7 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
     pres_col = 'pressure_dbar'
     o2_col = 'oxygen_saturation_percent'
     par_col = 'PAR_umol_m2_s'
+    chla_col = 'Chl(a)Phy-EthrinPhy-Cyanin'
     # Check if columns exist, fall back to parameter lookup if not
     if cond_col not in df.columns:
         cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
@@ -242,6 +259,12 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
         o2_col = get_parameter_name(ctd_type, 'oxygen_saturation', standardized=True)
     if par_col not in df.columns:
         par_col = get_parameter_name(ctd_type, 'PAR', standardized=True)
+    if chla_col not in df.columns:
+        chla_col = get_parameter_name(ctd_type, 'Chl(a)', standardized=True)
+        if chla_col not in df.columns:
+            chla_col = get_parameter_name(ctd_type, 'chlorophyll', standardized=True)
+            if chla_col not in df.columns:
+                chla_col = get_parameter_name(ctd_type, 'fluorescence', standardized=True)
     if not all([cond_col, pres_col, o2_col]):
         raise ValueError(
             f"Missing required columns for CTD type {ctd_type}\n"
@@ -282,6 +305,11 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
         df['PAR_avg_air'] = par_avg_air
     else:
         print("PAR column is missing in the air data.")
+    if chla_col in df_air.columns:
+        # Change the calculation to take the value under 50m, do the median and assign it to the offset.
+        chla_offset_50m = df[df[pres_col] > 50][chla_col].mean()
+        if not np.isnan(chla_offset_50m):
+            df[chla_col] = df[chla_col] - chla_offset_50m
         
     return df
 
@@ -547,8 +575,17 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         df['N2'] = np.nan
     '''
     if ctd_type=="seabird":
-        #Rename sal_col into sal_col+"_seabird"
-        df = df.rename(columns={sal_col: sal_col+"_seabird"})
-        df[sal_col] = sw.salt(df[cond_col]/42.914, df[temp_col], df[pres_col]) #This equation is the one used by the Idronaut CTD
+        # Only rename if not already renamed (prevent duplicate suffixes)
+        seabird_col = sal_col + "_seabird"
+        if sal_col in df.columns and seabird_col not in df.columns:
+            df = df.rename(columns={sal_col: seabird_col})
+        # Calculate new salinity using seawater library (Idronaut equation)
+        # sw.salt expects conductivity RATIO (R), not absolute conductivity
+        # R = measured_conductivity / reference_conductivity
+        # Reference conductivity = 42.914 mS/cm (standard seawater: 35 PSU, 15°C, 0 dbar)
+        # First convert mS/m to mS/cm, then calculate ratio
+        cond_mScm = df[cond_col] / 100.0  # Convert mS/m to mS/cm
+        conductivity_ratio = cond_mScm / 42.914  # Calculate conductivity ratio
+        df[sal_col] = sw.salt(conductivity_ratio, df[temp_col], df[pres_col])
 
     return df

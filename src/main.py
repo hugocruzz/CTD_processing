@@ -126,11 +126,23 @@ def extract_date_from_data(filepath, ctd_type):
         # If all fails, use today's date
         return datetime.now().strftime('%Y-%m-%d')
 
-def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output, Level2B_output, processing_mode=None):
+def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output, Level2B_output, processing_mode=None, split_profile=False):
     """Process a single CTD file and handle multiple profiles, respecting subfolder structure."""
 
     reader = get_reader(filepath, ctd_type)
     df = reader.read()
+
+    # For RBR files, determine instrument type and add Instrument column
+    if ctd_type == 'rbr':
+        if 'FDOM' in df.columns or any('fdom' in col.lower() for col in df.columns):
+            df['Instrument'] = 'Trident'
+            print(f"Detected Trident instrument (FDOM column found) in {filepath}")
+        else:
+            df['Instrument'] = 'CTD'
+            print(f"Detected CTD instrument (no FDOM column) in {filepath}")
+    else:
+        # For non-RBR files, set instrument based on ctd_type
+        df['Instrument'] = ctd_type.upper()
 
     # Extract profiles based on processing mode
     if processing_mode == "segment":
@@ -153,10 +165,47 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
         level1_path = save_profile(profile_df, Level1_output, profile_filename)
         print(f"Saved profile {i + 1} to {level1_path}")
 
-        # Process and save to Level2
+        # Check if this is a Trident instrument - skip processing if so
+        if 'Instrument' in profile_df.columns and profile_df['Instrument'].iloc[0] == 'Trident':
+            print(f"Skipping Level2 processing for Trident instrument profile {i + 1}")
+            continue
+
+        # Process and save to Level2 (only for non-Trident instruments)
         processed_df = process_raw_data(profile_df, ctd_type)
-        level2_path = save_profile(processed_df, Level2_output, profile_filename)
-        print(f"Processed profile {i + 1} saved to {level2_path}")
+        
+        if split_profile:
+            # Split profile into upward and downward segments
+            if 'pressure_dbar' in processed_df.columns:
+                pressure_col = 'pressure_dbar'
+            elif 'depth_m' in processed_df.columns:
+                pressure_col = 'depth_m'
+            else:
+                print(f"Warning: No pressure/depth column found for splitting profile {profile_filename}")
+                level2_path = save_profile(processed_df, Level2_output, profile_filename)
+                print(f"Processed profile {i + 1} saved to {level2_path}")
+                continue
+            
+            # Find maximum pressure/depth index
+            max_pressure_idx = processed_df[pressure_col].idxmax()
+            
+            # Split into downward and upward segments
+            downward_df = processed_df.iloc[:max_pressure_idx + 1].copy()
+            upward_df = processed_df.iloc[max_pressure_idx:].copy()
+            
+            # Save downward profile
+            downward_filename = f"{profile_filename}_downward"
+            downward_path = save_profile(downward_df, Level2_output, downward_filename)
+            print(f"Processed downward profile {i + 1} saved to {downward_path}")
+            
+            # Save upward profile (only if it has more than 1 data point)
+            if len(upward_df) > 1:
+                upward_filename = f"{profile_filename}_upward"
+                upward_path = save_profile(upward_df, Level2_output, upward_filename)
+                print(f"Processed upward profile {i + 1} saved to {upward_path}")
+        else:
+            # Save as single profile
+            level2_path = save_profile(processed_df, Level2_output, profile_filename)
+            print(f"Processed profile {i + 1} saved to {level2_path}")
 
     return df, filepath  # Return the dataframe for potential concatenation
 
@@ -233,6 +282,19 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
             for file in files:
                 reader = get_reader(file, ctd_type)
                 df = reader.read()
+                
+                # For RBR files, determine instrument type and add Instrument column
+                if ctd_type == 'rbr':
+                    if 'FDOM' in df.columns or any('fdom' in col.lower() for col in df.columns):
+                        df['Instrument'] = 'Trident'
+                        print(f"Detected Trident instrument (FDOM column found) in {file}")
+                    else:
+                        df['Instrument'] = 'CTD'
+                        print(f"Detected CTD instrument (no FDOM column) in {file}")
+                else:
+                    # For non-RBR files, set instrument based on ctd_type
+                    df['Instrument'] = ctd_type.upper()
+                    
                 dfs.append(df)
 
             if not dfs:
@@ -257,12 +319,54 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
 
             profiles_data = extract_profiles_from_data(concatenated_df, concat_filename, add_cast_name=True)
             processed_profiles = []
-            for profile_df, _ in profiles_data:
-                processed_profiles.append(process_raw_data(profile_df, ctd_type))
-            processed_df = pd.concat(processed_profiles, ignore_index=True)
+            
+            # Check if this is a Trident instrument - skip Level2 processing if so
+            is_trident = ('Instrument' in concatenated_df.columns and 
+                         concatenated_df['Instrument'].iloc[0] == 'Trident')
+            
+            if is_trident:
+                print(f"Skipping Level2 processing for Trident instrument data in {concat_filename}")
+            else:
+                if split_profile:
+                    # Process each profile individually and split them
+                    for j, (profile_df, profile_name) in enumerate(profiles_data):
+                        processed_df = process_raw_data(profile_df, ctd_type)
+                        
+                        # Find pressure/depth column for splitting
+                        if 'pressure_dbar' in processed_df.columns:
+                            pressure_col = 'pressure_dbar'
+                        elif 'depth_m' in processed_df.columns:
+                            pressure_col = 'depth_m'
+                        else:
+                            print(f"Warning: No pressure/depth column found for splitting profile {profile_name}")
+                            level2_path = save_profile(processed_df, Level2_output, f"{concat_filename}_profile_{j+1}")
+                            continue
+                        
+                        # Find maximum pressure/depth index
+                        max_pressure_idx = processed_df[pressure_col].idxmax()
+                        
+                        # Split into downward and upward segments
+                        downward_df = processed_df.iloc[:max_pressure_idx + 1].copy()
+                        upward_df = processed_df.iloc[max_pressure_idx:].copy()
+                        
+                        # Save downward profile
+                        downward_filename = f"{concat_filename}_profile_{j+1}_downward"
+                        downward_path = save_profile(downward_df, Level2_output, downward_filename)
+                        print(f"Processed downward profile {j + 1} saved to {downward_path}")
+                        
+                        # Save upward profile (only if it has more than 1 data point)
+                        if len(upward_df) > 1:
+                            upward_filename = f"{concat_filename}_profile_{j+1}_upward"
+                            upward_path = save_profile(upward_df, Level2_output, upward_filename)
+                            print(f"Processed upward profile {j + 1} saved to {upward_path}")
+                else:
+                    # Process and concatenate all profiles together (original behavior)
+                    for profile_df, _ in profiles_data:
+                        processed_profiles.append(process_raw_data(profile_df, ctd_type))
+                    processed_df = pd.concat(processed_profiles, ignore_index=True)
 
-            level2_path = save_profile(processed_df, Level2_output, concat_filename)
-            print(f"Processed concatenated profile saved to {level2_path}")
+                    level2_path = save_profile(processed_df, Level2_output, concat_filename)
+                    print(f"Processed concatenated profile saved to {level2_path}")
         # After Level2 files are created, format for A2PS:
         formatter = CTDFormatter(split_profile=split_profile)
         formatter.format_folder(Level2_output, Level2B_output)
@@ -274,21 +378,28 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
                 print(f"Could not determine CTD type for {file}")
                 continue
             print(f"Processing {file} as {ctd_type}")
-            process_ctd_file(file, ctd_type, directory, Level1_output, Level2_output, Level2B_output, processing_mode)
+            process_ctd_file(file, ctd_type, directory, Level1_output, Level2_output, Level2B_output, processing_mode, split_profile)
         # After all Level2 files are created, format for A2PS:
         formatter = CTDFormatter(split_profile=split_profile)
         formatter.format_folder(Level2_output, Level2B_output)
 
 if __name__ == "__main__":
-    #
     campaign = "LacNOX/20250408_Lexplore_spatial/"
     campaign = "LacNOX/20251405_LExplore/"
     campaign = "LacNOX/20250320_Camp-1/"
     #campaign = "Forel/"
-    #campaign = "Greenfjord 2023\casts"
     #campaign  =  "Forel"
     #campaign  =  "Sanna"
     campaign = "LacNOX/20250617_LExplore"
+    campaign = "LacNOX/20250624_Zug"
+    
+    campaign = "Greenfjord 2023\casts"
+    campaign = "LacNOX/"
+    campaign = "Greenfjord2025/"
+    campaign = "Subocean++"
+    
+    campaign = "Greenfjord2023/CTD/"
+    campaign = "Forel-GroupedStn"
     data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
     #data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
     Level1_output = os.path.join("data", "Level1", campaign) 
@@ -301,7 +412,7 @@ if __name__ == "__main__":
     # - None: Process each file as a single profile
     #processing_mode = "concatenate"  # Change as needed
     processing_mode =  None  # Change as needed
-    split_profile = False  # Set to True if you want to split profiles into upward/downward
+    split_profile = True  # Set to True if you want to split profiles into upward/downward
     process_all_files(data_dir, Level1_output, Level2_output, Level2B_output, processing_mode,split_profile)
     
     print("\nProfile processing complete!")
