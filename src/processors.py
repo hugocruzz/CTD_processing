@@ -63,7 +63,7 @@ class CTDFormatter:
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S").dt.strftime("%H:%M:%S")
         else:
             # If no time, force split profile for interpolation
-            self.split_profile = True
+            #self.split_profile = True
             print("No time columns found, splitting profile for interpolation.")
 
         ctd_ds = ctd_df.to_xarray()
@@ -107,34 +107,81 @@ class CTDFormatter:
 
     def _prepare_dataframe(self, ctd_ds, include_time=False, sort_by_pressure=True):
         """Prepare DataFrame for A2PS formatting, optionally including time columns."""
-        rename_dict = {
+        # Define potential rename mappings
+        potential_renames = {
             "temperature_C": "Tv2C",
             "salinity_psu": "Sal2",
             "oxygen_saturation_percent": "Sbeox2PS",
-            "Pres": "PrdE"
+            "Pres": "PrdE",
+            "pressure_dbar": "PrdE"  # Alternative pressure column name
         }
+        
+        # Only include renames for columns that actually exist in the dataset
+        rename_dict = {}
+        available_vars = list(ctd_ds.variables.keys())
+        
+        for original_name, new_name in potential_renames.items():
+            if original_name in available_vars:
+                rename_dict[original_name] = new_name
+        
+        # Determine which columns will be available after renaming
+        base_columns = []
+        if "Tv2C" in rename_dict.values():
+            base_columns.append("Tv2C")
+        if "Sal2" in rename_dict.values():
+            base_columns.append("Sal2")
+        if "Sbeox2PS" in rename_dict.values():
+            base_columns.append("Sbeox2PS")
+        if "PrdE" in rename_dict.values():
+            base_columns.append("PrdE")
+        
         if include_time:
             # Add time columns if present
             if "time_hh_mm_ss" in ctd_ds.variables and "date_mm_dd_yyyy" in ctd_ds.variables:
                 rename_dict["time_hh_mm_ss"] = "hh:mm:ss"
                 rename_dict["date_mm_dd_yyyy"] = "mm/dd/yyyy"
-                columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE", "hh:mm:ss", "mm/dd/yyyy"]
+                columns = base_columns + ["hh:mm:ss", "mm/dd/yyyy"]
             else:
-                columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]
+                columns = base_columns
         else:
-            columns = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]
-
-        ctd_ds = ctd_ds.rename_vars(rename_dict)
-        df = ctd_ds[columns].to_dataframe()
+            columns = base_columns
+        
+        # Only proceed with renaming if we have columns to rename
+        if rename_dict:
+            ctd_ds = ctd_ds.rename_vars(rename_dict)
+        
+        # Only select columns that actually exist after renaming
+        available_columns = [col for col in columns if col in ctd_ds.variables]
+        
+        if not available_columns:
+            print(f"Warning: No standard CTD columns found in dataset")
+            print(f"Available variables: {list(ctd_ds.variables.keys())}")
+            # Return a dataframe with whatever variables are available
+            df = ctd_ds.to_dataframe()
+        else:
+            df = ctd_ds[available_columns].to_dataframe()
+        
         df.reset_index(drop=True, inplace=True)
         #Drop rows if more than 3 value is NaN
         df = df.dropna()
 
         if sort_by_pressure:
-            df = df.drop_duplicates(subset='PrdE', keep='first')
-            df.sort_values(by=["PrdE"], inplace=True)
+            if 'PrdE' in df.columns:
+                df = df.drop_duplicates(subset='PrdE', keep='first')
+                df.sort_values(by=["PrdE"], inplace=True)
+            else:
+                print("Warning: No pressure column (PrdE) found for sorting")
         else:
-            df.sort_values(by=["hh:mm:ss"], inplace=True)
+            if 'hh:mm:ss' in df.columns and 'mm/dd/yyyy' in df.columns:
+                # Combine date and time into a single datetime object for proper sorting
+                df['datetime'] = pd.to_datetime(df['mm/dd/yyyy'] + ' ' + df['hh:mm:ss'])
+                df.sort_values(by="datetime", inplace=True)
+                df.drop(columns=['datetime'], inplace=True)
+            elif 'hh:mm:ss' in df.columns:
+                # Fallback to sorting by time if date is not available
+                df.sort_values(by=["hh:mm:ss"], inplace=True)
+            else:
+                print("Warning: No time column (hh:mm:ss) found for sorting")
         return df
 
     def _save_formatted_file(self, df, ctd_file, output_folder, suffix):
@@ -212,10 +259,14 @@ def get_parameter_name(ctd_type: str, param_type: str, standardized: bool = True
         'salinity': 'salinity_psu',
         'oxygen_saturation': 'oxygen_saturation_percent',
         'oxygen_concentration': 'oxygen_concentration_ml_per_L',
+        'dissolved_o2_saturation': 'oxygen_saturation_percent',  # Map RBR dissolved O2 saturation
+        'dissolved_o2_concentration': 'dissolved_o2_concentration',
         'depth': 'depth_m',
         'ph': 'ph',
         'turbidity': 'turbidity_NTU',
-        'PAR': 'PAR'
+        'PAR': 'PAR_umol_m2_s',
+        'chlorophyll': 'chlorophyll_mg_m3',
+        'fluorescence': 'fluorescence_rfu'
     }
     
     # If looking for standardized name and it's a common parameter, return directly
@@ -248,8 +299,10 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
     cond_col = 'conductivity_mS_per_m'
     pres_col = 'pressure_dbar'
     o2_col = 'oxygen_saturation_percent'
+    o2_conc = "oxygen_concentration_ml_per_L"
     par_col = 'PAR_umol_m2_s'
     chla_col = 'Chl(a)Phy-EthrinPhy-Cyanin'
+    
     # Check if columns exist, fall back to parameter lookup if not
     if cond_col not in df.columns:
         cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
@@ -265,47 +318,114 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
             chla_col = get_parameter_name(ctd_type, 'chlorophyll', standardized=True)
             if chla_col not in df.columns:
                 chla_col = get_parameter_name(ctd_type, 'fluorescence', standardized=True)
-    if not all([cond_col, pres_col, o2_col]):
+    if o2_conc not in df.columns:
+        o2_conc = get_parameter_name(ctd_type, 'oxygen_concentration', standardized=True)
+
+    # Check for required columns - pressure is mandatory, conductivity is optional
+    # Some RBR files may not have conductivity measurements
+    has_conductivity = cond_col is not None and cond_col in df.columns
+    has_pressure = pres_col is not None and pres_col in df.columns
+    
+    if not has_pressure:
         raise ValueError(
-            f"Missing required columns for CTD type {ctd_type}\n"
-            f"Looking for: conductivity_mS_per_m, pressure_dbar, oxygen_saturation_percent\n"
+            f"Missing required pressure column for CTD type {ctd_type}\n"
+            f"Looking for: pressure_dbar\n"
             f"Found columns: {df.columns.tolist()}"
         )
     
-    # Add debug print
-    print(f"Processing columns: {cond_col}, {pres_col}, {o2_col}")
+    if not has_conductivity:
+        print(f"Warning: No conductivity column found for CTD type {ctd_type}")
+        print(f"Available columns: {df.columns.tolist()}")
+        print("Skipping conductivity-based air data removal")
     
+    # Check which optional columns are available
+    has_oxygen = o2_col is not None and o2_col in df.columns
+    has_par = par_col is not None and par_col in df.columns
+    has_chla = chla_col is not None and chla_col in df.columns
+    has_o2_conc = o2_conc is not None and o2_conc in df.columns
+    # Add debug print
+    print(f"Processing columns: pressure={pres_col}")
+    if has_conductivity:
+        print(f"Conductivity column: {cond_col}")
+    if has_oxygen:
+        print(f"Oxygen column found: {o2_col}")
+    else:
+        print("No oxygen column found - skipping oxygen corrections")
+    if has_par:
+        print(f"PAR column found: {par_col}")
+    if has_chla:
+        print(f"Chlorophyll column found: {chla_col}")
+    if has_o2_conc:
+        print(f"Oxygen concentration column found: {o2_conc}")    
     # Process data using standardized column names
-    df_air = df[df[cond_col] < threshold_cond]
+    # If no conductivity, try to identify air data using pressure (close to surface)
+    if has_conductivity:
+        df_air = df[df[cond_col] < threshold_cond]
+    else:
+        # For instruments without conductivity, use pressure threshold for air detection
+        # Air measurements typically have pressure close to atmospheric (near 0 dbar)
+        pressure_threshold = 2.0  # dbar - measurements within 2 dbar of surface
+        df_air = df[df[pres_col] < pressure_threshold]
+        print(f"Using pressure threshold {pressure_threshold} dbar for air detection (no conductivity available)")
     
     if df_air.empty:
         print("No air data found, skipping corrections")
         return df
         
+    # Calculate pressure offset
     ctd_pres_offset = df_air[pres_col].median()
-    ctd_O2_offset = df_air[o2_col].median() - 100
     
-    if np.abs(ctd_O2_offset) > 50:
-        ctd_O2_offset = 0
-        print("Error with offsetting Oxygen data with air, the oxygen in the air is badly measured")
-        
-    df = df[df[cond_col] > threshold_cond].copy()
+    # Calculate oxygen offset only if oxygen column exists
+    ctd_O2_offset = 0  # Default value
+    if has_oxygen:
+        ctd_O2_offset = df_air[o2_col].median() - 100
+        if np.abs(ctd_O2_offset) > 50:
+            ctd_O2_offset = 0
+            print("Error with offsetting Oxygen data with air, the oxygen in the air is badly measured")
+
+
+    # Filter out air data
+    if has_conductivity:
+        df = df[df[cond_col] > threshold_cond].copy()
+    else:
+        # Use pressure threshold instead of conductivity
+        pressure_threshold = 2.0  # dbar
+        df = df[df[pres_col] >= pressure_threshold].copy()
+        print(f"Filtered air data using pressure threshold {pressure_threshold} dbar")
+    
+    # Apply corrections
     df[pres_col] = df[pres_col] - ctd_pres_offset
-    df[o2_col] = df[o2_col] - ctd_O2_offset
     
-    if df[o2_col].mean() < 0:
-        print("Error: Negative mean oxygen saturation after correction")
-        
+    if has_oxygen:
+        old_o2 = df[o2_col].copy()
+        df[o2_col] = df[o2_col] - ctd_O2_offset
+        if df[o2_col].mean() < 0:
+            print("Error: Negative mean oxygen saturation after correction")
+    if has_o2_conc:
+        #Recalcuate oxygen concentration based on corrected saturation using the general formula with old and new saturation Oxygen_concentration  = oxygen_saturation_percent * solubility / 100 where solubility stay the same
+        df[o2_conc] = df[o2_conc]*df[o2_col]/old_o2 
+    else:
+        df[o2_conc] = df.apply(
+            lambda row: calculate_oxygen_mgl(
+                row['temperature_C'], 
+                row['salinity_psu'], 
+                row[o2_col]
+            ), axis=1
+        )
+
     # Filter df[pres_col] < 0
     df = df[df[pres_col] > 0].copy()
     
-    # Calculate PAR average in the air
-    if par_col in df_air.columns:
+    # Calculate PAR average in the air (optional)
+    if has_par and par_col in df_air.columns:
         par_avg_air = df_air[par_col].mean()
         df['PAR_avg_air'] = par_avg_air
     else:
-        print("PAR column is missing in the air data.")
-    if chla_col in df_air.columns:
+        if has_par:
+            print("PAR column is missing in the air data.")
+    
+    # Handle chlorophyll offset (optional)
+    if has_chla and chla_col in df_air.columns:
         # Change the calculation to take the value under 50m, do the median and assign it to the offset.
         chla_offset_50m = df[df[pres_col] > 50][chla_col].mean()
         if not np.isnan(chla_offset_50m):
@@ -457,26 +577,51 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     o2_col = 'oxygen_saturation_percent'
     
     # Check columns exist
-    missing_cols = []
-    for col in [pres_col, temp_col, cond_col, sal_col]:
-        if col not in df.columns:
-            missing_cols.append(col)
+    has_pressure = pres_col in df.columns
+    has_temperature = temp_col in df.columns
+    has_conductivity = cond_col in df.columns
+    has_salinity = sal_col in df.columns
     
-    if missing_cols:
-        print(f"Warning: Missing columns {missing_cols}. Trying to find alternative columns.")
-        for col in missing_cols:
-            param_type = col.split('_')[0]  # Extract base parameter name
-            alt_col = get_parameter_name(ctd_type, param_type, standardized=True)
-            if alt_col:
-                print(f"Using {alt_col} instead of {col}")
-                if col == pres_col:
-                    pres_col = alt_col
-                elif col == temp_col:
-                    temp_col = alt_col
-                elif col == cond_col:
-                    cond_col = alt_col
-                elif col == sal_col:
-                    sal_col = alt_col
+    # Try to find alternative columns
+    if not has_pressure:
+        alt_col = get_parameter_name(ctd_type, 'pressure', standardized=True)
+        if alt_col and alt_col in df.columns:
+            pres_col = alt_col
+            has_pressure = True
+    
+    if not has_temperature:
+        alt_col = get_parameter_name(ctd_type, 'temperature', standardized=True)
+        if alt_col and alt_col in df.columns:
+            temp_col = alt_col
+            has_temperature = True
+    
+    if not has_conductivity:
+        alt_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
+        if alt_col and alt_col in df.columns:
+            cond_col = alt_col
+            has_conductivity = True
+    
+    if not has_salinity:
+        alt_col = get_parameter_name(ctd_type, 'salinity', standardized=True)
+        if alt_col and alt_col in df.columns:
+            sal_col = alt_col
+            has_salinity = True
+    
+    # Check what we can calculate with available data
+    if not has_pressure:
+        raise ValueError(f"Pressure column is required but not found. Available columns: {df.columns.tolist()}")
+    
+    print(f"Available columns for ocean calculations:")
+    print(f"  Pressure: {pres_col if has_pressure else 'MISSING'}")
+    print(f"  Temperature: {temp_col if has_temperature else 'MISSING'}")
+    print(f"  Conductivity: {cond_col if has_conductivity else 'MISSING'}")
+    print(f"  Salinity: {sal_col if has_salinity else 'MISSING'}")
+    
+    # If we don't have basic CTD parameters, skip ocean parameter calculations
+    if not (has_temperature and (has_conductivity or has_salinity)):
+        print("Warning: Insufficient data for full ocean parameter calculations")
+        print("Need at least temperature and either conductivity or salinity")
+        return df
     
     # Add debug print
     print(f"Calculating ocean parameters using columns: {pres_col}, {temp_col}, {sal_col}, {o2_col}")
@@ -495,51 +640,58 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         else:
             raise ValueError("Pressure column is missing, cannot calculate depth.")
     
-    # Convert to numpy arrays
+    # Convert to numpy arrays - only if columns exist
     p = df[pres_col].abs().to_numpy()
-    sal = df[sal_col].to_numpy()
-    temp = df[temp_col].to_numpy()
-    cond = df[cond_col].to_numpy()
     
-    SA = gsw.SA_from_SP(sal, p, SITE_CONFIG['LONGITUDE'], SITE_CONFIG['LATITUDE'])
-    CT = gsw.CT_from_t(SA, temp, p)
-    
-    # Calculate derived parameters
-    df['pot_temp_C'] = gsw.pt_from_CT(SA, CT)
-    df['density_kg_m3'] = gsw.density.rho(SA, CT, p)
-    if pres_col in df.columns and 'density_kg_m3' in df.columns:
-        mld = find_mld(df[temp_col], df['density_kg_m3'], df[pres_col])
-        df['mld_temp'] = mld['mld_temp']
-        df['mld_dens'] = mld['mld_dens']
+    # Calculate derived parameters only if we have the required data
+    if has_temperature and has_salinity:
+        temp = df[temp_col].to_numpy()
+        sal = df[sal_col].to_numpy()
+        
+        SA = gsw.SA_from_SP(sal, p, SITE_CONFIG['LONGITUDE'], SITE_CONFIG['LATITUDE'])
+        CT = gsw.CT_from_t(SA, temp, p)
+        
+        # Calculate derived parameters
+        df['pot_temp_C'] = gsw.pt_from_CT(SA, CT)
+        df['density_kg_m3'] = gsw.density.rho(SA, CT, p)
+        
+        # Calculate MLD if we have the required columns
+        if has_temperature and 'density_kg_m3' in df.columns:
+            mld = find_mld(df[temp_col], df['density_kg_m3'], df[pres_col])
+            df['mld_temp'] = mld['mld_temp']
+            df['mld_dens'] = mld['mld_dens']
+        
+        # Calculate oxygen solubility
+        o2_sol_umol = gsw.O2sol(SA, CT, p, SITE_CONFIG['LONGITUDE'], SITE_CONFIG['LATITUDE'])
+        o2_sol_mll = o2_sol_umol * 0.022391  # μmol/kg to mL/L
+        o2_sol_mgl = o2_sol_mll * 1.42905    # mL/L to mg/L
+        
+        # Store solubility values
+        df['o2_solubility_mll'] = o2_sol_mll
+        df['o2_solubility_mgl'] = o2_sol_mgl
+        
+        # Check if oxygen column exists for concentration calculations
+        if o2_col in df.columns:
+            # Calculate oxygen concentrations using vectorized operations
+            df['o2_mgkg_Weiss'] = df.apply(
+                lambda row: calculate_oxygen_mgkg(
+                    row[temp_col], 
+                    row[sal_col], 
+                    row[o2_col]
+                ), axis=1
+            )
+            df['o2_mgl_Weiss'] = df.apply(
+                lambda row: calculate_oxygen_mgl(
+                    row[temp_col], 
+                    row[sal_col], 
+                    row[o2_col]
+                ), axis=1
+            )
+        else:
+            print("No oxygen saturation data available - skipping oxygen concentration calculations")
+        
     else:
-        print("Required columns for MLD calculation are missing.")
-
-    # Add missing oxygen calculations
-    o2_sol_umol = gsw.O2sol(SA, CT, p, SITE_CONFIG['LONGITUDE'], SITE_CONFIG['LATITUDE'])
-    o2_sol_mll = o2_sol_umol * 0.022391  # μmol/kg to mL/L
-    o2_sol_mgl = o2_sol_mll * 1.42905    # mL/L to mg/L
-    
-    # Store solubility values with CTD type suffix
-    df[f'o2_solubility_mll'] = o2_sol_mll
-    df[f'o2_solubility_mgl'] = o2_sol_mgl
-
-    if o2_col in df.columns:
-        # Calculate oxygen concentrations using vectorized operations
-        df[f'o2_mgkg'] = df.apply(
-            lambda row: calculate_oxygen_mgkg(
-                row[temp_col], 
-                row[sal_col], 
-                row[o2_col]
-            ), axis=1
-        )
-        #Essayer de retrouve rla meme valeur 
-        df[f'o2_mgl'] = df.apply(
-            lambda row: calculate_oxygen_mgl(
-                row[temp_col], 
-                row[sal_col], 
-                row[o2_col]
-            ), axis=1
-        )
+        print("Skipping oceanographic calculations - need temperature and salinity")
     '''
     # Calculate N² with proper handling of warnings
     try:
@@ -574,7 +726,7 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         print(f"Warning: Error calculating N2: {e}")
         df['N2'] = np.nan
     '''
-    if ctd_type=="seabird":
+    if ctd_type == "seabird" and has_conductivity and has_temperature and has_salinity:
         # Only rename if not already renamed (prevent duplicate suffixes)
         seabird_col = sal_col + "_seabird"
         if sal_col in df.columns and seabird_col not in df.columns:
@@ -587,5 +739,7 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         cond_mScm = df[cond_col] / 100.0  # Convert mS/m to mS/cm
         conductivity_ratio = cond_mScm / 42.914  # Calculate conductivity ratio
         df[sal_col] = sw.salt(conductivity_ratio, df[temp_col], df[pres_col])
+    elif ctd_type == "seabird" and not has_conductivity:
+        print("Warning: Seabird-specific salinity calculation skipped - no conductivity data")
 
     return df

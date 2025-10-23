@@ -6,7 +6,7 @@ This repository contains a Python-based pipeline for processing CTD (Conductivit
 
 ## **Features**
 1. **CTD Data Processing**:
-   - Supports multiple CTD types: Idronaut, Seabird, RBR, and Exo.
+   - Supports multiple CTD types: Idronaut, Seabird, RBR (text), RBR RSK (binary), and Exo.
    - Applies corrections to raw data, including:
      - Removing air measurements.
      - Correcting oxygen saturation (dO2) using air data.
@@ -55,6 +55,8 @@ CTD_processing/
   - `scipy`
   - `gsw` (Gibbs SeaWater Oceanographic Toolbox)
   - `matplotlib` (for visualization)
+- Optional (for RBR RSK files):
+  - `rbr` (RBR Python package for reading .rsk files)
 
 ### **Installation**
 1. Clone the repository:

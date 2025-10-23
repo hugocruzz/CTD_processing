@@ -29,20 +29,27 @@ def find_files_by_extension(directory: str, extensions: List[str], recursive: bo
     
     return all_files
 
-def save_profile(df: pd.DataFrame, output_dir: str, filename: str) -> str:
+def save_profile(df: pd.DataFrame, output_dir: str, filename: str, relative_path: str = None) -> str:
     """
-    Save a profile DataFrame to the specified output directory.
+    Save a profile DataFrame to the specified output directory, preserving subfolder structure.
     
     Args:
         df: DataFrame containing profile data
-        output_dir: Directory where the file should be saved
+        output_dir: Base output directory
         filename: Name of the output file
+        relative_path: Optional relative path to preserve subfolder structure
         
     Returns:
         Path to the saved file
     """
-    os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, filename)
+    # If relative_path is provided, create the full output directory path
+    if relative_path:
+        full_output_dir = os.path.join(output_dir, relative_path)
+    else:
+        full_output_dir = output_dir
+        
+    os.makedirs(full_output_dir, exist_ok=True)
+    output_file = os.path.join(full_output_dir, filename)
     #if output_file have no extension, add .csv
     if not output_file.endswith('.csv'):
         output_file += '.csv'

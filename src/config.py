@@ -21,6 +21,12 @@ COLUMN_MAPPINGS = {
         'Date': ('date', None),
         'Time': ('time', None),
         "PAR": ('PAR_umol_m2_s', None),
+        # Chlorophyll columns from Recover files
+        'Trx-chl(a)': ('chlorophyll_trx_mg_m3', None),
+        'Phycocyanin': ('phycocyanin_mg_m3', None),
+        'Phycoerythrin': ('phycoerythrin_mg_m3', None),
+        # Alternative column names for Recover files
+        'Pressure': ('pressure_dbar', None),
     },
     
     'seabird': {
@@ -50,7 +56,8 @@ COLUMN_MAPPINGS = {
         'Salinity': ('salinity_psu', None),
         'Speed of sound': ('sound_speed_m_per_s', None),
         'Specific conductivity': ('conductivity_specific_mS_per_m', 0.1),  # µS/cm to mS/m
-        'Dissolved O2 saturation': ('oxygen_saturation_percent', None)
+        'Dissolved O2 saturation': ('oxygen_saturation_percent', None),
+        
     },
     
     'exo': {
@@ -80,10 +87,80 @@ COLUMN_MAPPINGS = {
         'Trx-chl(a)': ('chlorophyll_rfu', None),
         'Pressure': ('pressure_dbar', None),
         'time In': ('time', None),  # Added for datetime integration
-        'date': ('date', None)      # Added for datetime integration
-    }
+        'date': ('date', None),      # Added for datetime integration
+        # Chlorophyll columns from Recover files
+        'Phycocyanin': ('phycocyanin_mg_m3', None),
+        'Phycoerythrin': ('phycoerythrin_mg_m3', None),
+    },
+    
+    'rbr_rsk': {
+        # Raw column names from RSK files -> standardized names with conversion factors
+        # Based on rsk.printchannels() output and actual data columns:
+        # conductivity: mS/cm -> mS/m (multiply by 100)
+        # temperature: °C -> °C (no conversion)
+        # pressure: dbar -> dbar (no conversion)
+        # sea_pressure: dbar -> dbar (no conversion)  
+        # depth: m -> m (no conversion)
+        # salinity: PSU -> PSU (no conversion)
+        # speed_of_sound: m/s -> m/s (no conversion)
+        # specific_conductivity: µS/cm -> mS/m (multiply by 0.1)
+        
+        # Time and datetime columns
+        'Time': ('timestamp', None),
+        'timestamp': ('timestamp', None),
+        
+        # Temperature columns
+        'conductivity': ('conductivity_mS_per_m', 100),  # mS/cm to mS/m
+        'conductivity_mS_per_m': ('conductivity_mS_per_m', None),  # Already standardized
+        'temperature': ('temperature_C', None),  # Already in °C
+        'temperature_C': ('temperature_C', None),  # Already standardized
+        'temperature1': ('temperature1', None),  # Secondary temperature sensor
+        
+        # Pressure and depth columns
+        'pressure': ('pressure_dbar', None),  # Already in dbar
+        'pressure_dbar': ('pressure_dbar', None),  # Already standardized
+        'sea_pressure': ('sea_pressure_dbar', None),  # Already in dbar
+        'sea_pressure_dbar': ('sea_pressure_dbar', None),  # Already standardized
+        'depth': ('depth_m', None),  # Already in m
+        'depth_m': ('depth_m', None),  # Already standardized
+        
+        # Salinity columns
+        'salinity': ('salinity_psu', None),  # Already in PSU
+        'salinity_psu': ('salinity_psu', None),  # Already standardized
+        
+        # Sound speed columns
+        'speed_of_sound': ('speed_of_sound_m_per_s', None),  # Already in m/s
+        'speed_of_sound_m_per_s': ('speed_of_sound_m_per_s', None),  # Already standardized
+        
+        # Conductivity-related columns
+        'specific_conductivity': ('specific_conductivity_mS_per_m', 0.1),  # µS/cm to mS/m
+        'specific_conductivity_mS_per_m': ('specific_conductivity_mS_per_m', None),  # Already standardized
+        
+        # Dissolved oxygen columns
+        'dissolved_o2_concentration': ('dissolved_o2_concentration', None),
+        'dissolved_o2_saturation': ('oxygen_saturation_percent', None),  # Map to standard oxygen saturation
+        'oxygen_saturation_percent': ('oxygen_saturation_percent', None),  # Already standardized
+        
+        # Instrument and metadata columns
+        'instrument': ('instrument', None),
+        'Instrument': ('Instrument', None),  # Keep original capitalization
+        'Cast_name': ('Cast_name', None),
+        
+        # Alternative capitalized versions that might appear
+        'Conductivity': ('conductivity_mS_per_m', 100),
+        'Temperature': ('temperature_C', None),
+        'Pressure': ('pressure_dbar', None),
+        'Sea_pressure': ('sea_pressure_dbar', None),
+        'Depth': ('depth_m', None),
+        'Salinity': ('salinity_psu', None),
+        'Speed_of_sound': ('speed_of_sound_m_per_s', None),
+        'Specific_conductivity': ('specific_conductivity_mS_per_m', 0.1),
+        
+        # Additional dissolved oxygen variations
+        'Dissolved_o2_concentration': ('dissolved_o2_concentration', None),
+        'Dissolved_o2_saturation': ('oxygen_saturation_percent', None),
+    },
 }
-
 def get_standard_column_name(raw_name, ctd_type):
     """
     Get standardized column name for a raw column name.
