@@ -197,6 +197,7 @@ class CTDFormatter:
 def process_raw_data(df, ctd_type):
     """Process raw CTD data with all corrections and quality checks."""
     df_copy = df.copy()
+    df = quality_check_oxygen(df, ctd_type)
     df = clean_air_data(df, ctd_type)
     if df.empty:
         print("No valid data found after removing air data, could not perform calculations ")
@@ -204,6 +205,7 @@ def process_raw_data(df, ctd_type):
     df = calculate_ocean_params(df, ctd_type)
     df = identify_downcast(df, ctd_type)
     df = quality_check_ph(df, ctd_type)
+    df = correct_chla_offset_and_pressure(df)
     
     return df
 
@@ -299,9 +301,10 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
     cond_col = 'conductivity_mS_per_m'
     pres_col = 'pressure_dbar'
     o2_col = 'oxygen_saturation_percent'
-    o2_conc = "oxygen_concentration_ml_per_L"
+    o2_conc = "oxygen_concentration_mg_per_L"
     par_col = 'PAR_umol_m2_s'
-    chla_col = 'Chl(a)Phy-EthrinPhy-Cyanin'
+    chla_col = 'Chl(a)Phy-EthrinPhy-Cyanin' 
+    depth_col = 'depth_m'
     
     # Check if columns exist, fall back to parameter lookup if not
     if cond_col not in df.columns:
@@ -320,6 +323,8 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
                 chla_col = get_parameter_name(ctd_type, 'fluorescence', standardized=True)
     if o2_conc not in df.columns:
         o2_conc = get_parameter_name(ctd_type, 'oxygen_concentration', standardized=True)
+    if depth_col not in df.columns:
+        depth_col = get_parameter_name(ctd_type, 'depth', standardized=True)
 
     # Check for required columns - pressure is mandatory, conductivity is optional
     # Some RBR files may not have conductivity measurements
@@ -412,10 +417,22 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
                 row[o2_col]
             ), axis=1
         )
+    '''
+    #Make twinx to plot df[o2_col] and df[o2_conc] together for checking
+    import matplotlib.pyplot as plt
+    plt.figure()
 
+    df[o2_conc].plot()
+    df[o2_conc+"_idronaut_corrected"].plot()
+    df[o2_conc+"Weiss"].plot()
+    ax2 = plt.twinx()
+    df[o2_col].plot(ax=ax2)
+    plt.legend()'''
     # Filter df[pres_col] < 0
     df = df[df[pres_col] > 0].copy()
-    
+    if depth_col in df.columns: 
+        df = df[df[depth_col] > 0].copy()
+    df = correct_chla_offset_and_pressure(df)
     # Calculate PAR average in the air (optional)
     if has_par and par_col in df_air.columns:
         par_avg_air = df_air[par_col].mean()
@@ -424,13 +441,48 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
         if has_par:
             print("PAR column is missing in the air data.")
     
-    # Handle chlorophyll offset (optional)
-    if has_chla and chla_col in df_air.columns:
-        # Change the calculation to take the value under 50m, do the median and assign it to the offset.
-        chla_offset_50m = df[df[pres_col] > 50][chla_col].mean()
-        if not np.isnan(chla_offset_50m):
-            df[chla_col] = df[chla_col] - chla_offset_50m
+    return df
+
+def correct_chla_offset_and_pressure(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply offset to chlorophyll columns based on deep water average and remove negative pressure readings.
+    
+    Args:
+        df (pd.DataFrame): The input DataFrame with CTD data.
         
+    Returns:
+        pd.DataFrame: The processed DataFrame.
+    """
+    
+    # Standardized pressure column name
+    pres_col = 'pressure_dbar'
+    
+    if pres_col not in df.columns:
+        print(f"Warning: Pressure column '{pres_col}' not found. Skipping chlorophyll offset and pressure correction.")
+        return df
+        
+    # List of chlorophyll and related columns to apply offset
+    chla_cols_to_offset = [
+        "Trx-chl(a)", "Trx-Chl-a", "Pethr", "Pchan", 
+        "Chl(a)", "Phy-Ethrin", "Phy-Cyanin"
+    ]
+    
+    # Apply offset for each chlorophyll column found in the DataFrame
+    for col in chla_cols_to_offset:
+        if col in df.columns:
+            # Calculate the mean from data at 50m depth or more
+            deep_water_mean = df[df[pres_col] >= 50][col].min() #CHANGED TO HAVE NO NEGATIVE VALUES
+            
+            if pd.notna(deep_water_mean):
+                # Apply the offset to the entire column
+                df[col] = df[col] - deep_water_mean
+                print(f"Applied offset of {deep_water_mean:.4f} to column '{col}'.")
+            else:
+                print(f"Warning: Could not calculate offset for '{col}' (no data >= 50m or all values are NaN).")
+
+    # Remove rows with negative pressure after all corrections
+    df = df[df[pres_col] >= 0].copy()
+    
     return df
 
 def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
@@ -463,25 +515,94 @@ def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
 
 def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     """Apply quality control to pH measurements."""
-    # Use direct column name
+    # Use direct column name first, else search mappings
     ph_col = 'ph'
-    
+
+    # desired valid pH range
+    ph_min = 6.8
+    ph_max = 8.6
+
+    # Helper to apply filter on a given column name
+    def _filter_ph_column(df_local: pd.DataFrame, col: str) -> pd.DataFrame:
+        before = len(df_local)
+        # Keep only rows where pH is within [ph_min, ph_max] or NaN (leave NaNs as-is)
+        # If pH values are NaN we don't drop them here (they may be handled elsewhere)
+        valid_mask = df_local[col].isna() | ((df_local[col] >= ph_min) & (df_local[col] <= ph_max))
+        filtered = df_local[valid_mask].copy()
+        after = len(filtered)
+        removed = before - after
+        if removed > 0:
+            print(f"Filtered out {removed} rows with '{col}' outside [{ph_min}, {ph_max}].")
+        else:
+            print(f"No pH rows removed for column '{col}' (range [{ph_min}, {ph_max}]).")
+        return filtered
+
     # Check if pH column exists - first try direct match
     if ph_col in df.columns:
-        df.loc[(df[ph_col] < 6) | (df[ph_col] > 9), ph_col] = np.nan
-        return df
-    
+        # Ensure numeric
+        df[ph_col] = pd.to_numeric(df[ph_col], errors='coerce')
+        return _filter_ph_column(df, ph_col)
+
     # Try to find pH column using COLUMN_MAPPINGS if direct match failed
     ctd_type = ctd_type.lower()
     for raw_name, (std_name, _) in COLUMN_MAPPINGS[ctd_type].items():
         if 'ph' == std_name.lower():
             if raw_name in df.columns:
-                df.loc[(df[raw_name] < 6) | (df[raw_name] > 9), raw_name] = np.nan
-                print(f"Applied pH quality check to column: {raw_name}")
-                break
-    
+                # Ensure numeric
+                df[raw_name] = pd.to_numeric(df[raw_name], errors='coerce')
+                print(f"Applying pH filter to column: {raw_name}")
+                return _filter_ph_column(df, raw_name)
+
+    # If no pH column found, return dataframe unchanged
     return df
 
+
+def quality_check_oxygen(df: pd.DataFrame, ctd_type: str, 
+                         o2_min: float = 0.0, 
+                         o2_max: float = 200.0) -> pd.DataFrame:
+    """
+    Apply quality control to oxygen saturation measurements.
+    Filter out unrealistic values that indicate sensor malfunction or air contamination.
+    
+    Natural oxygen saturation typically ranges from 80-110%, with extreme cases:
+    - High productivity/algal blooms: up to ~130-140%
+    - Values above 150% almost always indicate sensor errors or air bubbles
+    - Values above 200% are physically unrealistic in natural waters
+    
+    Args:
+        df: DataFrame containing CTD data
+        ctd_type: Type of CTD instrument
+        o2_min: Minimum acceptable O2 saturation (%) - default 0%
+        o2_max: Maximum acceptable O2 saturation (%) - default 150%
+                (Conservative threshold allowing extreme supersaturation)
+    
+    Returns:
+        DataFrame with invalid oxygen values set to NaN (rows are preserved)
+    """
+    o2_col = 'oxygen_saturation_percent'
+    o2_conc_col = "O2ppm"
+    if o2_col not in df.columns:
+        return df
+    
+    # Convert to numeric, handling any non-numeric entries
+    df[o2_col] = pd.to_numeric(df[o2_col], errors='coerce')
+    
+    # Count values outside the range (excluding NaN)
+    unrealistic_mask = df[o2_col].notna() & ((df[o2_col] < o2_min) | (df[o2_col] > o2_max))
+    n_filtered = unrealistic_mask.sum()
+    
+    if n_filtered > 0:
+        print(f"Warning: Setting {n_filtered} oxygen saturation values to NaN "
+              f"(outside realistic range: {o2_min}-{o2_max}%)")
+        
+        # Set unrealistic values to NaN instead of dropping rows
+        df.loc[unrealistic_mask, o2_col] = np.nan
+        
+        # Also invalidate corresponding concentration values if present
+        if o2_conc_col in df.columns:
+            df.loc[unrealistic_mask, o2_conc_col] = np.nan
+    
+    return df
 
 
 def find_mld(temp, dens, depth, thresh_temp=0.2, thresh_dens=0.03, thresh_depth=1):
@@ -633,6 +754,9 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
             try:
                 # Convert pressure to depth (negative values indicate depth below sea level)
                 df['depth_m'] = -gsw.z_from_p(df[pres_col].to_numpy(), SITE_CONFIG['LATITUDE'])
+                #Filter depth_m < 0
+                df = df[df['depth_m'] > 0].copy()
+
                 print("Depth column calculated from pressure.")
             except Exception as e:
                 print(f"Error calculating depth from pressure: {e}")
@@ -667,8 +791,8 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         o2_sol_mgl = o2_sol_mll * 1.42905    # mL/L to mg/L
         
         # Store solubility values
-        df['o2_solubility_mll'] = o2_sol_mll
-        df['o2_solubility_mgl'] = o2_sol_mgl
+        #df['o2_solubility_mll'] = o2_sol_mll
+        #df['o2_solubility_mgl'] = o2_sol_mgl
         
         # Check if oxygen column exists for concentration calculations
         if o2_col in df.columns:

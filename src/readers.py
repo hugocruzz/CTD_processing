@@ -133,6 +133,7 @@ class BaseReader:
                     print(f"Found metadata for {base_filename}")
                     # Add each piece of metadata as a new column in the dataframe
                     for key, value in metadata_series.items():
+
                         if 'lat' in key.lower() or 'lon' in key.lower():
                             if 'lat' in key.lower():
                                 df[key] = self._convert_gps_to_decimal(value)
@@ -724,15 +725,26 @@ class GF23Reader(BaseReader):
             column_mapping = get_column_mapping(self.reader_type)
             df.rename(columns=column_mapping, inplace=True)
 
-            # Standardize column names and apply unit conversions
-            df = self.standardize_columns(df)
-            
             # Merge with Recover data if available
             if recover_df is not None:
                 df = self.merge_recover_data(df, recover_df)
 
             df = self._load_and_merge_metadata(df)
 
+            # Standardize column names and apply unit conversions
+            df = self.standardize_columns(df)
+            
+            
+            # If df has duplicate 'chlorophyll_rfu' columns, keep only the first one
+            if 'chlorophyll_rfu' in df.columns and df.columns.tolist().count('chlorophyll_rfu') > 1:
+                # Get the first chlorophyll_rfu column and drop the rest
+                cols = df.columns.tolist()
+                indices = [i for i, col in enumerate(cols) if col == 'chlorophyll_rfu']
+                
+                # Keep all columns except duplicate chlorophyll_rfu columns (keep only first)
+                df = df.loc[:, ~df.columns.duplicated(keep='first')]
+                print(f"Removed {len(indices)-1} duplicate 'chlorophyll_rfu' column(s)")
+            
             return df
 
         except Exception as e:
@@ -1003,7 +1015,6 @@ class RBRReader(BaseReader):
                 # Add more conversions as needed
                 
         return df_converted
-
 
 class RBRruskinReader(BaseReader):
     """Reader for RBR RSK files using the RBR Python package."""

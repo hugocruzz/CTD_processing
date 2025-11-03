@@ -14,17 +14,29 @@ COLUMN_MAPPINGS = {
         'Pres': ('pressure_dbar', None),
         'Press': ('pressure_dbar', None),
         'Temp': ('temperature_C', None),
-        'Cond': ('conductivity_mS_per_m', None),  # Already in mS/m
+        'Cond': ('conductivity_mS_per_cm', None),  # Already in mS/m
         'Sal': ('salinity_psu', None),
         'O2%': ('oxygen_saturation_percent', None),
-        'O2ppm': ('oxygen_concentration_ml_per_L', 0.7),  # Convert ppm to ml/L
+        'O2ppm': ('O2ppm',None),  # Convert ppm to ml/L
         'Date': ('date', None),
+        'ph': ('ph', None),
+        'Ph': ('ph', None),
+        'pH': ('ph', None),
         'Time': ('time', None),
         "PAR": ('PAR_umol_m2_s', None),
         # Chlorophyll columns from Recover files
-        'Trx-chl(a)': ('chlorophyll_trx_mg_m3', None),
-        'Phycocyanin': ('phycocyanin_mg_m3', None),
-        'Phycoerythrin': ('phycoerythrin_mg_m3', None),
+        'Trx-chl(a)': ('chlorophyll_rfu', None),
+        'Phycocyanin': ('phycocyanin_rfu', None),
+        'Phycoerythrin': ('phycoerythrin_rfu', None),
+        'Trx-Chl-a': ('chlorophyll_rfu', None),  # Alternative capitalization
+        "Pethr": ('phycoerythrin_rfu', None),  # Alternative capitalization
+        "Phyc": ('phycocyanin_rfu', None),      # Alternative capitalization
+        "Chl(a)": ('chlorophyll_rfu', None),    # Alternative capitalization
+        "Phy-Ethrin": ('phycoerythrin_rfu', None),  # Alternative capitalization
+        'TRX-Chl(a)': ('chlorophyll_rfu', None),
+        "Phy-Cyanin": ('phycocyanin_rfu', None),      # Alternative capitalization
+        'Pchan': ('phycocyanin_rfu', None),  # Alternative column names for Recover files
+        'Pechan': ('phycoerythrin_rfu', None),  # Alternative
         # Alternative column names for Recover files
         'Pressure': ('pressure_dbar', None),
     },
@@ -33,15 +45,17 @@ COLUMN_MAPPINGS = {
         'prdM': ('pressure_dbar', None),
         'depSM': ('depth_m', None),
         't090C': ('temperature_C', None),
-        'c0S/m': ('conductivity_mS_per_m', 1000),  # Convert S/m to mS/m
+        'c0S/m': ('conductivity_mS_per_cm', 10),  # Convert S/m to mS/m
         'sal00': ('salinity_psu', None),
         'sbeox0PS': ('oxygen_saturation_percent', None),
         'ph': ('ph', None),
+        'Ph': ('ph', None),
+        'pH': ('ph', None),
         'turbWETntu0': ('turbidity_NTU', None),
         'flECO-AFL': ('fluorescence_mg_m3', None),
-        'oxsatML/L': ('oxygen_concentration_ml_per_L', None),
+        'oxsatML/L': ('oxygen_saturated_ml_per_L', None),
         'scan': ('scan', None),
-        'flag': ('flag', None)
+        'flag': ('flag', None),
     },
     
     'rbr': {
@@ -69,7 +83,7 @@ COLUMN_MAPPINGS = {
         'DEPTH M': ('depth_m', None),
         'PRESSURE PSI A': ('pressure_dbar', 0.689476),  # PSI to dbar
         'ODO % SAT': ('oxygen_saturation_percent', None),
-        'ODO MG/L': ('oxygen_concentration_ml_per_L', 0.7),  # mg/L to ml/L (approximate)
+        'ODO MG/L': ('oxygen_concentration_mg_per_L',1),  # mg/L to ml/L (approximate)
         'PH': ('ph', None),
         'TEMP °C': ('temperature_C', None),
         'TURBIDITY FNU': ('turbidity_NTU', None)
@@ -77,9 +91,9 @@ COLUMN_MAPPINGS = {
     'gf23': {
         'Depth': ('depth_m', None),
         'Temperature': ('temperature_C', None),
-        'Conductivity': ('conductivity_mS_per_m', None),
+        'Conductivity': ('conductivity_mS_per_cm', None),
         'Oxygen %': ('oxygen_saturation_percent', None),
-        'Oxygen mg/L': ('oxygen_concentration_ml_per_L', None),
+        'Oxygen mg/L': ('oxygen_concentration_mg_per_L', None),
         'pH': ('ph', None),
         'PAR': ('PAR_umol_m2_s', None),
         'Salinity': ('salinity_psu', None),
@@ -89,8 +103,8 @@ COLUMN_MAPPINGS = {
         'time In': ('time', None),  # Added for datetime integration
         'date': ('date', None),      # Added for datetime integration
         # Chlorophyll columns from Recover files
-        'Phycocyanin': ('phycocyanin_mg_m3', None),
-        'Phycoerythrin': ('phycoerythrin_mg_m3', None),
+        'Phycocyanin': ('phycocyanin_rfu', None),
+        'Phycoerythrin': ('phycoerythrin_rfu', None),
     },
     
     'rbr_rsk': {

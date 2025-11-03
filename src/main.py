@@ -454,8 +454,8 @@ if __name__ == "__main__":
     campaign = "BASAL-CH4/"
     campaign = "Subocean++/20250919LExplore/"
     campaign = "LacNOX/"
-    campaign = "Greenfjord2023"
     campaign = "GF24"
+    campaign = "Greenfjord2023"
     data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
     #data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
     Level1_output = os.path.join("data", "Level1", campaign) 
