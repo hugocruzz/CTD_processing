@@ -34,7 +34,7 @@ def is_recover_file(filename: str) -> bool:
 
 def segment_profiles(pressure_series: pd.Series, prominence: float = 5, distance: int = 10):
     """
-    Segment profiles from a pressure series, using local minima as delimiters.
+    Segment pressure data into individual profiles by finding local minima.
 
     Args:
         pressure_series (pd.Series): The pressure data.
@@ -44,8 +44,16 @@ def segment_profiles(pressure_series: pd.Series, prominence: float = 5, distance
     Returns:
         List[tuple]: List of (start_index, end_index) for each profile.
     """
+    # Remove NaN values by forward filling, then backward filling if needed
+    # This ensures savgol_filter doesn't encounter NaN values
+    pressure_clean = pressure_series.fillna(method='ffill').fillna(method='bfill')
+    
+    # If still have NaNs (all NaN case), use zeros
+    if pressure_clean.isna().any():
+        pressure_clean = pressure_clean.fillna(0)
+    
     # Smooth the pressure data to reduce noise
-    smoothed_pressure = savgol_filter(pressure_series, window_length=21, polyorder=2)
+    smoothed_pressure = savgol_filter(pressure_clean, window_length=21, polyorder=2)
 
     # Find local minima (valleys)
     minima_indices, _ = find_peaks(-smoothed_pressure, prominence=prominence, distance=distance)
@@ -148,7 +156,7 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
     """Process a single CTD file and handle multiple profiles, respecting subfolder structure."""
 
     reader = get_reader(filepath, ctd_type, campaign_name=campaign_name)
-    if "Leg3" not in filepath:
+    if "20240717_0747_idronaut" in filepath:
         print(1)
     df = reader.read()
 
@@ -255,7 +263,8 @@ def get_ctd_type(filename: str) -> str:
     elif extension == '.txt' and ('_data' in filename.lower()):
             return 'rbr'
     elif extension == '.rsk':
-        return 'rbr_rsk'
+        print(f"Skipping .rsk file: {filename}")
+        return None  # Skip .rsk files for now
     elif extension == ".csv" and "kor" in filename.lower():
         return 'exo'
     elif extension == ".txt" and ".TXT" in os.path.basename(filename):
@@ -454,9 +463,15 @@ if __name__ == "__main__":
     campaign = "BASAL-CH4/"
     campaign = "Subocean++/20250919LExplore/"
     campaign = "LacNOX/"
+    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\processed\{campaign}"
     campaign = "GF24"
     campaign = "Greenfjord2023"
     data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
+    
+    campaign = "LacNOX/20250408_Lexplore_spatial/"
+    campaign = "LacNOX/20250819_leman/"
+    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw_formatted\{campaign}"
+
     #data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
     Level1_output = os.path.join("data", "Level1", campaign) 
     Level2_output = os.path.join("data", "Level2", campaign)

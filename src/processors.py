@@ -308,7 +308,17 @@ def clean_air_data(df: pd.DataFrame, ctd_type: str, threshold_cond=None) -> pd.D
     
     # Check if columns exist, fall back to parameter lookup if not
     if cond_col not in df.columns:
-        cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
+        # Search for conductivity column variants directly in the dataframe
+        conductivity_variants = ['conductivity_mS_per_m', 'conductivity_mS_per_cm', 'conductivity']
+        cond_col = None
+        for variant in conductivity_variants:
+            if variant in df.columns:
+                cond_col = variant
+                break
+        
+        # If still not found, try get_parameter_name as fallback
+        if cond_col is None:
+            cond_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
     if pres_col not in df.columns:
         pres_col = get_parameter_name(ctd_type, 'pressure', standardized=True)
     if o2_col not in df.columns:
@@ -514,7 +524,7 @@ def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     return df
 
 def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
-    """Apply quality control to pH measurements."""
+    """Apply quality control to pH measurements by setting invalid values to NaN."""
     # Use direct column name first, else search mappings
     ph_col = 'ph'
 
@@ -524,23 +534,25 @@ def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
 
     # Helper to apply filter on a given column name
     def _filter_ph_column(df_local: pd.DataFrame, col: str) -> pd.DataFrame:
-        before = len(df_local)
-        # Keep only rows where pH is within [ph_min, ph_max] or NaN (leave NaNs as-is)
-        # If pH values are NaN we don't drop them here (they may be handled elsewhere)
-        valid_mask = df_local[col].isna() | ((df_local[col] >= ph_min) & (df_local[col] <= ph_max))
-        filtered = df_local[valid_mask].copy()
-        after = len(filtered)
-        removed = before - after
-        if removed > 0:
-            print(f"Filtered out {removed} rows with '{col}' outside [{ph_min}, {ph_max}].")
+        # Ensure numeric
+        df_local[col] = pd.to_numeric(df_local[col], errors='coerce')
+        
+        # Count invalid values (excluding already NaN)
+        invalid_mask = ~df_local[col].isna() & ((df_local[col] < ph_min) | (df_local[col] > ph_max))
+        num_invalid = invalid_mask.sum()
+        
+        # Set invalid pH values to NaN (keep the rows, just invalidate the pH values)
+        df_local.loc[invalid_mask, col] = np.nan
+        
+        if num_invalid > 0:
+            print(f"Set {num_invalid} pH values in '{col}' to NaN (outside range [{ph_min}, {ph_max}]).")
         else:
-            print(f"No pH rows removed for column '{col}' (range [{ph_min}, {ph_max}]).")
-        return filtered
+            print(f"No pH values invalidated for column '{col}' (all within range [{ph_min}, {ph_max}]).")
+        
+        return df_local
 
     # Check if pH column exists - first try direct match
     if ph_col in df.columns:
-        # Ensure numeric
-        df[ph_col] = pd.to_numeric(df[ph_col], errors='coerce')
         return _filter_ph_column(df, ph_col)
 
     # Try to find pH column using COLUMN_MAPPINGS if direct match failed
@@ -548,8 +560,6 @@ def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
     for raw_name, (std_name, _) in COLUMN_MAPPINGS[ctd_type].items():
         if 'ph' == std_name.lower():
             if raw_name in df.columns:
-                # Ensure numeric
-                df[raw_name] = pd.to_numeric(df[raw_name], errors='coerce')
                 print(f"Applying pH filter to column: {raw_name}")
                 return _filter_ph_column(df, raw_name)
 
@@ -717,10 +727,21 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
             has_temperature = True
     
     if not has_conductivity:
-        alt_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
-        if alt_col and alt_col in df.columns:
-            cond_col = alt_col
-            has_conductivity = True
+        # Search for conductivity column variants directly in the dataframe
+        conductivity_variants = ['conductivity_mS_per_m', 'conductivity_mS_per_cm', 'conductivity']
+        for variant in conductivity_variants:
+            if variant in df.columns:
+                cond_col = variant
+                has_conductivity = True
+                print(f"Found conductivity column: {cond_col}")
+                break
+        
+        # If still not found, try get_parameter_name as fallback
+        if not has_conductivity:
+            alt_col = get_parameter_name(ctd_type, 'conductivity', standardized=True)
+            if alt_col and alt_col in df.columns:
+                cond_col = alt_col
+                has_conductivity = True
     
     if not has_salinity:
         alt_col = get_parameter_name(ctd_type, 'salinity', standardized=True)
@@ -859,8 +880,21 @@ def calculate_ocean_params(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
         # sw.salt expects conductivity RATIO (R), not absolute conductivity
         # R = measured_conductivity / reference_conductivity
         # Reference conductivity = 42.914 mS/cm (standard seawater: 35 PSU, 15°C, 0 dbar)
-        # First convert mS/m to mS/cm, then calculate ratio
-        cond_mScm = df[cond_col] / 100.0  # Convert mS/m to mS/cm
+        
+        # Check conductivity units and convert if needed
+        if 'conductivity_mS_per_m' in cond_col:
+            # Convert mS/m to mS/cm
+            cond_mScm = df[cond_col] / 100.0
+            print(f"Converting conductivity from mS/m to mS/cm for salinity calculation")
+        elif 'conductivity_mS_per_cm' in cond_col:
+            # Already in mS/cm
+            cond_mScm = df[cond_col]
+            print(f"Using conductivity in mS/cm for salinity calculation")
+        else:
+            # Assume mS/cm if unit is unclear
+            cond_mScm = df[cond_col]
+            print(f"Warning: Conductivity units unclear for column '{cond_col}', assuming mS/cm")
+        
         conductivity_ratio = cond_mScm / 42.914  # Calculate conductivity ratio
         df[sal_col] = sw.salt(conductivity_ratio, df[temp_col], df[pres_col])
     elif ctd_type == "seabird" and not has_conductivity:
