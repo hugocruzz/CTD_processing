@@ -765,13 +765,60 @@ class ExoReader(BaseReader):
     def __init__(self, filepath: str, reader_type: str, campaign_name: str = None):
         super().__init__(filepath, reader_type, campaign_name)
         self.units = {}
+    @staticmethod
+    def _detect_exo_encoding(filepath: str):
+        """Return (encoding, skiprows) by inspecting the raw bytes of the file."""
+        with open(filepath, 'rb') as _f:
+            raw = _f.read(8192)
+
+        # BOM-based detection
+        if raw[:2] in (b'\xff\xfe', b'\xfe\xff'):
+            encoding = 'utf-16'
+        elif raw[:3] == b'\xef\xbb\xbf':
+            encoding = 'utf-8-sig'
+        else:
+            try:
+                import chardet
+                encoding = chardet.detect(raw)['encoding'] or 'utf-8'
+            except ImportError:
+                encoding = 'utf-8'
+
+        # Find the header row: the first line that starts with 'time' or 'date'
+        # (case-insensitive) or contains comma-separated column-like tokens.
+        try:
+            text = raw.decode(encoding, errors='replace')
+        except (UnicodeDecodeError, LookupError):
+            text = raw.decode('utf-8', errors='replace')
+            encoding = 'utf-8'
+
+        header_keywords = ('time', 'date', 'temp', 'cond', 'depth', 'do ', 'sal',
+                           'chlorophyll', 'turbidity', 'ph ', 'orp')
+        skiprows = 0
+        for i, line in enumerate(text.splitlines()):
+            low = line.strip().lower()
+            if not low:
+                continue
+            if (low.startswith('time') or low.startswith('date')
+                    or any(kw in low for kw in header_keywords)):
+                skiprows = i
+                break
+
+        return encoding, skiprows
+
     def read(self) -> pd.DataFrame:
-        """Read RBR CTD data from text file.
-        
+        """Read EXO probe data from CSV file.
+
+        Automatically detects encoding (UTF-8, UTF-16, etc.) and the number of
+        metadata rows to skip before the column-header row, so the reader works
+        with both old (UTF-16, 9 header rows) and new (UTF-8, 0 header rows)
+        KOR software export formats.
+
         Returns:
-            pd.DataFrame: DataFrame with processed RBR CTD data
+            pd.DataFrame: DataFrame with processed EXO CTD data
         """
-        self.df = pd.read_csv(self.filepath, encoding="utf-16", delimiter=",", skiprows=9)
+        encoding, skiprows = self._detect_exo_encoding(self.filepath)
+        print(f"ExoReader: detected encoding={encoding}, skiprows={skiprows} for {self.filepath}")
+        self.df = pd.read_csv(self.filepath, encoding=encoding, delimiter=",", skiprows=skiprows)
         # Convert all numeric columns to float, handling any non-numeric entries
         for column in self.df.columns:
             # Skip columns that are likely dates or text

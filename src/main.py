@@ -46,14 +46,22 @@ def segment_profiles(pressure_series: pd.Series, prominence: float = 5, distance
     """
     # Remove NaN values by forward filling, then backward filling if needed
     # This ensures savgol_filter doesn't encounter NaN values
-    pressure_clean = pressure_series.fillna(method='ffill').fillna(method='bfill')
+    pressure_clean = pressure_series.ffill().bfill()
     
     # If still have NaNs (all NaN case), use zeros
     if pressure_clean.isna().any():
         pressure_clean = pressure_clean.fillna(0)
     
     # Smooth the pressure data to reduce noise
-    smoothed_pressure = savgol_filter(pressure_clean, window_length=21, polyorder=2)
+    # window_length must be odd, <= len(data), and > polyorder
+    _wl = min(21, len(pressure_clean))
+    if _wl % 2 == 0:
+        _wl -= 1
+    _wl = max(_wl, 3)  # minimum valid window for polyorder=2
+    if _wl <= 2 or len(pressure_clean) < 3:
+        smoothed_pressure = pressure_clean.values.astype(float)
+    else:
+        smoothed_pressure = savgol_filter(pressure_clean, window_length=_wl, polyorder=min(2, _wl - 1))
 
     # Find local minima (valleys)
     minima_indices, _ = find_peaks(-smoothed_pressure, prominence=prominence, distance=distance)
@@ -156,8 +164,7 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
     """Process a single CTD file and handle multiple profiles, respecting subfolder structure."""
 
     reader = get_reader(filepath, ctd_type, campaign_name=campaign_name)
-    if "20240717_0747_idronaut" in filepath:
-        print(1)
+
     df = reader.read()
 
     # For RBR files, determine instrument type and add Instrument column
@@ -194,7 +201,7 @@ def process_ctd_file(filepath, ctd_type, data_dir, Level1_output, Level2_output,
         print(f"Saved profile {i + 1} to {level1_path}")
 
         # Check if this is a Trident instrument - skip processing if so
-        if 'Instrument' in profile_df.columns and profile_df['Instrument'].iloc[0] == 'Trident':
+        if 'Instrument' in profile_df.columns and not profile_df.empty and profile_df['Instrument'].iloc[0] == 'Trident':
             print(f"Skipping Level2 processing for Trident instrument profile {i + 1}")
             continue
 
@@ -274,14 +281,23 @@ def get_ctd_type(filename: str) -> str:
     else:
         return None
     
-def process_all_files(directory: str, Level1_output, Level2_output, Level2B_output, processing_mode=None, split_profile=False) -> None:
+def process_all_files(directory: str, Level1_output, Level2_output, Level2B_output, processing_mode=None, split_profile=False, sort_by='datetime', sort_by_pressure=True, pressure_offset=0.0) -> None:
     """
     Process all CTD files in directory.
+
+    Args:
+        sort_by: Column to sort concatenated data by ('datetime' or 'depth')
+        sort_by_pressure: Whether to sort by pressure in Level2B formatted files (ensures monotonic pressure)
+        pressure_offset: Value in dbar added to every pressure reading before formatting (can be negative)
     """
     print(f"Replicating directory structure from {directory} to {Level1_output}")
 
-    # Find all CTD files
-    all_files = find_files_by_extension(directory, ['.cnv', '.txt', '.csv', '.rsk'], recursive=True)
+    # Ensure output folders exist; existing files are overwritten in place
+    for _out in [Level1_output, Level2_output, Level2B_output]:
+        os.makedirs(_out, exist_ok=True)
+
+    # Find all CTD files (excluding .rsk which is not yet supported)
+    all_files = find_files_by_extension(directory, ['.cnv', '.txt', '.csv'], recursive=True)
 
     if not all_files:
         print(f"No CTD files found in {directory}")
@@ -353,7 +369,11 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
             concatenated_df = pd.concat(dfs, ignore_index=True)
 
             # Sort by time or depth to ensure proper ordering
-            if 'datetime' in concatenated_df.columns:
+            if sort_by == 'datetime' and 'datetime' in concatenated_df.columns:
+                concatenated_df.sort_values('datetime', inplace=True)
+            elif sort_by == 'depth' and 'depth_m' in concatenated_df.columns:
+                concatenated_df.sort_values('depth_m', inplace=True)
+            elif 'datetime' in concatenated_df.columns:
                 concatenated_df.sort_values('datetime', inplace=True)
             elif 'depth_m' in concatenated_df.columns:
                 concatenated_df.sort_values('depth_m', inplace=True)
@@ -370,56 +390,23 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
             
             # Check if this is a Trident instrument - skip Level2 processing if so
             is_trident = ('Instrument' in concatenated_df.columns and 
+                         not concatenated_df.empty and
                          concatenated_df['Instrument'].iloc[0] == 'Trident')
             
             if is_trident:
                 print(f"Skipping Level2 processing for Trident instrument data in {concat_filename}. Still exporting it to Level2.")
                 level2_path = save_profile(concatenated_df, Level2_output, concat_filename, relative_path)
                 print(f"Processed concatenated profile saved to {level2_path}")
-                
-            else:
-                if split_profile:
-                    # Process each profile individually and split them
-                    for j, (profile_df, profile_name) in enumerate(profiles_data):
-                        processed_df = process_raw_data(profile_df, ctd_type)
-                        
-                        # Find pressure/depth column for splitting
-                        if 'pressure_dbar' in processed_df.columns:
-                            pressure_col = 'pressure_dbar'
-                        elif 'depth_m' in processed_df.columns:
-                            pressure_col = 'depth_m'
-                        else:
-                            print(f"Warning: No pressure/depth column found for splitting profile {profile_name}")
-                            level2_path = save_profile(processed_df, Level2_output, f"{concat_filename}_profile_{j+1}", relative_path)
-                            continue
-                        
-                        # Find maximum pressure/depth index
-                        max_pressure_idx = processed_df[pressure_col].idxmax()
-                        
-                        # Split into downward and upward segments
-                        downward_df = processed_df.iloc[:max_pressure_idx + 1].copy()
-                        upward_df = processed_df.iloc[max_pressure_idx:].copy()
-                        
-                        # Save downward profile
-                        downward_filename = f"{concat_filename}_profile_{j+1}_downward"
-                        downward_path = save_profile(downward_df, Level2_output, downward_filename, relative_path)
-                        print(f"Processed downward profile {j + 1} saved to {downward_path}")
-                        
-                        # Save upward profile (only if it has more than 1 data point)
-                        if len(upward_df) > 1:
-                            upward_filename = f"{concat_filename}_profile_{j+1}_upward"
-                            upward_path = save_profile(upward_df, Level2_output, upward_filename, relative_path)
-                            print(f"Processed upward profile {j + 1} saved to {upward_path}")
-                else:
-                    # Process and concatenate all profiles together (original behavior)
-                    for profile_df, _ in profiles_data:
-                        processed_profiles.append(process_raw_data(profile_df, ctd_type))
-                    processed_df = pd.concat(processed_profiles, ignore_index=True)
 
-                    level2_path = save_profile(processed_df, Level2_output, concat_filename, relative_path)
-                    print(f"Processed concatenated profile saved to {level2_path}")
+            else:
+                # Save each extracted profile to Level2 (unsplit); CTDFormatter handles splitting at Level2B
+                for j, (profile_df, profile_name) in enumerate(profiles_data):
+                    processed_df = process_raw_data(profile_df, ctd_type)
+                    level2_path = save_profile(processed_df, Level2_output, profile_name, relative_path)
+                    print(f"Processed profile {j + 1} saved to {level2_path}")
         # After Level2 files are created, format for A2PS:
-        formatter = CTDFormatter(split_profile=split_profile)
+        formatter = CTDFormatter(split_profile=split_profile, sort_by_pressure=sort_by_pressure,
+                                 pressure_offset=pressure_offset)
         formatter.format_folder(Level2_output, Level2B_output)
     else:
         # Process files individually
@@ -440,11 +427,11 @@ def process_all_files(directory: str, Level1_output, Level2_output, Level2B_outp
             if relative_path == '.':
                 relative_path = None  # No subfolder
                 
-            process_ctd_file(file, ctd_type, directory, Level1_output, Level2_output, Level2B_output, processing_mode, split_profile, relative_path, campaign_name=campaign_name)
+            process_ctd_file(file, ctd_type, directory, Level1_output, Level2_output, Level2B_output,
+                             processing_mode, False, relative_path, campaign_name=campaign_name)
         # After all Level2 files are created, format for A2PS:
-        if split_profile:
-            print(split_profile)
-        formatter = CTDFormatter(split_profile=split_profile)
+        formatter = CTDFormatter(split_profile=split_profile, sort_by_pressure=sort_by_pressure,
+                                 pressure_offset=pressure_offset)
         formatter.format_folder(Level2_output, Level2B_output)
 
 if __name__ == "__main__":
@@ -461,16 +448,16 @@ if __name__ == "__main__":
     
     campaign = "Forel-GroupedStn"
     campaign = "BASAL-CH4/"
-    campaign = "Subocean++/20250919LExplore/"
     campaign = "LacNOX/"
     data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\processed\{campaign}"
     campaign = "GF24"
     campaign = "Greenfjord2023"
-    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
     
-    campaign = "LacNOX/20250408_Lexplore_spatial/"
-    campaign = "LacNOX/20250819_leman/"
+    campaign = r"LacNOX/\20250617_LExplore/"  
+    campaign = "LacNOX/20260324Lexplore/"
+    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\Level0\{campaign}"
     data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw_formatted\{campaign}"
+    data_dir = fr"C:\Users\cruz\Documents\SENSE\SubOcean\data\raw\{campaign}"
 
     #data_dir = fr"C:\Users\cruz\Documents\SENSE\CTD_processing\data\Level0\{campaign}"
     Level1_output = os.path.join("data", "Level1", campaign) 
@@ -484,9 +471,12 @@ if __name__ == "__main__":
     #processing_mode = "concatenate"  # Change as needed
     processing_mode =  None  # Change as needed
     split_profile = False  # Set to True if you want to split profiles into upward/downward
+    sort_by = 'datetime'  # Set to 'datetime' or 'depth' to control sorting of concatenated data
+    #sort_by = 'depth'
+    sort_by_pressure = True  # Set to True to ensure monotonic pressure in Level2B formatted files
     if campaign == "BASAL-CH4/":
         split_profile = False  # Do not split profiles for BASAL-CH4 campaign
-    process_all_files(data_dir, Level1_output, Level2_output, Level2B_output, processing_mode,split_profile)
+    process_all_files(data_dir, Level1_output, Level2_output, Level2B_output, processing_mode, split_profile, sort_by, sort_by_pressure)
     
     print("\nProfile processing complete!")
     print("To organize profiles by station, run match_profiles.py separately.")

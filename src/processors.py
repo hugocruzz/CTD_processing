@@ -10,12 +10,15 @@ import seawater as sw
 import os
 import glob
 import xarray as xr
+from scipy.ndimage import uniform_filter1d
 
 class CTDFormatter:
     """Class to format CTD data into A2PS-compatible format, with time integration."""
 
-    def __init__(self, split_profile=True):
+    def __init__(self, split_profile=True, sort_by_pressure=True, pressure_offset=0.0):
         self.split_profile = split_profile
+        self.sort_by_pressure = sort_by_pressure
+        self.pressure_offset = pressure_offset
 
     def format_folder(self, input_folder, output_folder):
         """
@@ -43,24 +46,32 @@ class CTDFormatter:
         if "timestamp" in ctd_df.columns:
             ctd_df["timestamp"] = pd.to_datetime(ctd_df["timestamp"])
             ctd_df = ctd_df.set_index("timestamp")
-            ctd_df = ctd_df.resample("1S").interpolate(method="linear")
+            _num = ctd_df.select_dtypes(include="number")
+            _str = ctd_df.select_dtypes(exclude="number")
+            _num = _num.resample("1s").interpolate(method="linear")
+            if not _str.empty:
+                ctd_df = pd.concat([_num, _str.resample("1s").ffill()], axis=1)
+            else:
+                ctd_df = _num
             ctd_df = ctd_df.reset_index()
             ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%m/%d/%Y")
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["timestamp"]).dt.strftime("%H:%M:%S")
-            #Interpolate to new date range of 1 second interval 
-
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"]).dt.strftime("%H:%M:%S")
             ctd_df.drop(columns=["timestamp"], inplace=True)
         elif "date_mm_dd_yyyy" in ctd_df.columns:
-            #Interpolate to new date range of 1 second interval 
             ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"], format="%d/%m/%Y")
             ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S")
             ctd_df = ctd_df.set_index(["date_mm_dd_yyyy", "time_hh_mm_ss"])
-            ctd_df = ctd_df.resample("1S").interpolate(method="linear")
+            _num = ctd_df.select_dtypes(include="number")
+            _str = ctd_df.select_dtypes(exclude="number")
+            _num = _num.resample("1s").interpolate(method="linear")
+            if not _str.empty:
+                ctd_df = pd.concat([_num, _str.resample("1s").ffill()], axis=1)
+            else:
+                ctd_df = _num
             ctd_df = ctd_df.reset_index()
-
-            ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"], format="%d/%m/%Y").dt.strftime("%m/%d/%Y")
-            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"], format="%H:%M:%S").dt.strftime("%H:%M:%S")
+            ctd_df["date_mm_dd_yyyy"] = pd.to_datetime(ctd_df["date_mm_dd_yyyy"]).dt.strftime("%m/%d/%Y")
+            ctd_df["time_hh_mm_ss"] = pd.to_datetime(ctd_df["time_hh_mm_ss"]).dt.strftime("%H:%M:%S")
         else:
             # If no time, force split profile for interpolation
             #self.split_profile = True
@@ -87,83 +98,86 @@ class CTDFormatter:
         ctd_ds = ctd_ds.swap_dims({'index': 'Pres'})
         ctd_ds = ctd_ds.set_coords('Pres')
         ctd_ds = ctd_ds.drop_vars('index')
+        # Apply pressure offset (in dbar) before converting to psi
+        if self.pressure_offset != 0.0:
+            ctd_ds["Pres"] = ctd_ds["Pres"] + self.pressure_offset
         ctd_ds["Pres"] = ctd_ds["Pres"] * 1.45038  # dbar to psi
 
+        pres_tag = "_Pres" if self.sort_by_pressure else ""
         if self.split_profile:
             max_pressure_idx = ctd_ds["Pres"].argmax()
             # Downward
             downward_ds = ctd_ds.isel(Pres=slice(None, max_pressure_idx.values))
             downward_df = self._prepare_dataframe(downward_ds)
-            self._save_formatted_file(downward_df, ctd_file, output_folder, "_downward_formatted.asc")
+            self._save_formatted_file(downward_df, ctd_file, output_folder, f"{pres_tag}_downward_formatted.asc")
             # Upward
             upward_ds = ctd_ds.isel(Pres=slice(max_pressure_idx.values, None))
             if len(upward_ds.Pres) > 1:
                 upward_df = self._prepare_dataframe(upward_ds)
-                self._save_formatted_file(upward_df, ctd_file, output_folder, "_upward_formatted.asc")
+                self._save_formatted_file(upward_df, ctd_file, output_folder, f"{pres_tag}_upward_formatted.asc")
         else:
             # Entire profile, include time columns if present
-            formatted_df = self._prepare_dataframe(ctd_ds, include_time=True, sort_by_pressure=False)
-            self._save_formatted_file(formatted_df, ctd_file, output_folder, "_formatted.asc")
+            formatted_df = self._prepare_dataframe(ctd_ds, include_time=True, sort_by_pressure=self.sort_by_pressure)
+            self._save_formatted_file(formatted_df, ctd_file, output_folder, f"{pres_tag}_formatted.asc")
 
     def _prepare_dataframe(self, ctd_ds, include_time=False, sort_by_pressure=True):
-        """Prepare DataFrame for A2PS formatting, optionally including time columns."""
-        # Define potential rename mappings
+        """Prepare DataFrame for A2PS formatting, optionally including time columns.
+
+        The first columns are always: Tv2C, Sal2, Sbeox2PS, PrdE [, hh:mm:ss, mm/dd/yyyy].
+        All other columns present in the dataset are appended after those, in their
+        original order, so no data is discarded.
+        """
         potential_renames = {
             "temperature_C": "Tv2C",
             "salinity_psu": "Sal2",
             "oxygen_saturation_percent": "Sbeox2PS",
-            "Pres": "PrdE",
-            "pressure_dbar": "PrdE"  # Alternative pressure column name
         }
-        
-        # Only include renames for columns that actually exist in the dataset
-        rename_dict = {}
+
         available_vars = list(ctd_ds.variables.keys())
-        
+
+        # Build rename dict for columns that actually exist
+        rename_dict = {}
         for original_name, new_name in potential_renames.items():
             if original_name in available_vars:
                 rename_dict[original_name] = new_name
-        
-        # Determine which columns will be available after renaming
-        base_columns = []
-        if "Tv2C" in rename_dict.values():
-            base_columns.append("Tv2C")
-        if "Sal2" in rename_dict.values():
-            base_columns.append("Sal2")
-        if "Sbeox2PS" in rename_dict.values():
-            base_columns.append("Sbeox2PS")
-        if "PrdE" in rename_dict.values():
-            base_columns.append("PrdE")
-        
+
+        # Also rename time columns when requested
         if include_time:
-            # Add time columns if present
-            if "time_hh_mm_ss" in ctd_ds.variables and "date_mm_dd_yyyy" in ctd_ds.variables:
+            if "time_hh_mm_ss" in available_vars:
                 rename_dict["time_hh_mm_ss"] = "hh:mm:ss"
+            if "date_mm_dd_yyyy" in available_vars:
                 rename_dict["date_mm_dd_yyyy"] = "mm/dd/yyyy"
-                columns = base_columns + ["hh:mm:ss", "mm/dd/yyyy"]
-            else:
-                columns = base_columns
-        else:
-            columns = base_columns
-        
-        # Only proceed with renaming if we have columns to rename
+
         if rename_dict:
             ctd_ds = ctd_ds.rename_vars(rename_dict)
-        
-        # Only select columns that actually exist after renaming
-        available_columns = [col for col in columns if col in ctd_ds.variables]
-        
-        if not available_columns:
-            print(f"Warning: No standard CTD columns found in dataset")
-            print(f"Available variables: {list(ctd_ds.variables.keys())}")
-            # Return a dataframe with whatever variables are available
-            df = ctd_ds.to_dataframe()
+
+        # Convert FULL dataset to DataFrame (keeps all columns)
+        df = ctd_ds.to_dataframe()
+
+        # reset_index(drop=False) promotes "Pres" dimension to a regular column
+        df.reset_index(drop=False, inplace=True)
+        if "index" in df.columns:
+            df.drop(columns=["index"], inplace=True)
+
+        # Rename pressure dimension → PrdE
+        if "Pres" in df.columns:
+            df.rename(columns={"Pres": "PrdE"}, inplace=True)
+
+        # Build column order: priority columns first, then everything else
+        priority = ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"]
+        if include_time:
+            priority += ["hh:mm:ss", "mm/dd/yyyy"]
+
+        front_cols = [c for c in priority if c in df.columns]
+        extra_cols = [c for c in df.columns if c not in front_cols]
+        df = df[front_cols + extra_cols]
+
+        # Drop rows that are NaN in the priority columns only
+        priority_present = [c for c in ["Tv2C", "Sal2", "Sbeox2PS", "PrdE"] if c in df.columns]
+        if priority_present:
+            df = df.dropna(subset=priority_present)
         else:
-            df = ctd_ds[available_columns].to_dataframe()
-        
-        df.reset_index(drop=True, inplace=True)
-        #Drop rows if more than 3 value is NaN
-        df = df.dropna()
+            df = df.dropna()
 
         if sort_by_pressure:
             if 'PrdE' in df.columns:
@@ -173,16 +187,17 @@ class CTDFormatter:
                 print("Warning: No pressure column (PrdE) found for sorting")
         else:
             if 'hh:mm:ss' in df.columns and 'mm/dd/yyyy' in df.columns:
-                # Combine date and time into a single datetime object for proper sorting
                 df['datetime'] = pd.to_datetime(df['mm/dd/yyyy'] + ' ' + df['hh:mm:ss'])
                 df.sort_values(by="datetime", inplace=True)
-                df.drop(columns=['datetime'], inplace=True)
             elif 'hh:mm:ss' in df.columns:
-                # Fallback to sorting by time if date is not available
                 df.sort_values(by=["hh:mm:ss"], inplace=True)
             else:
                 print("Warning: No time column (hh:mm:ss) found for sorting")
+
         return df
+
+    # Minimum temperature threshold accepted by downstream software (A2PS)
+    TV2C_MIN = -0.994
 
     def _save_formatted_file(self, df, ctd_file, output_folder, suffix):
         """Save the formatted DataFrame to a file."""
@@ -191,7 +206,21 @@ class CTDFormatter:
         if "Sbeox2PS" in df.columns and df["Sbeox2PS"].mean() < 0:
             print("WARNING: Oxygen values are negative, check the data!")
             print(ctd_file)
-        df.to_csv(output_path, sep='\t', index=False)
+        # ⚠️  TEMPORARY FIX — downstream software (A2PS) does not parse
+        # temperatures below -0.994 °C correctly (fixed-width column overflow).
+        # Values below this threshold are clamped to -0.994. This is an
+        # APPROXIMATION — review when the software limitation is resolved.
+        if "Tv2C" in df.columns:
+            n_clamped = (df["Tv2C"] < self.TV2C_MIN).sum()
+            if n_clamped > 0:
+                print(
+                    f"WARNING [Tv2C clamp]: {n_clamped} temperature values below "
+                    f"{self.TV2C_MIN} °C were clamped to {self.TV2C_MIN} °C "
+                    f"(TEMPORARY FIX for downstream software limit). File: {ctd_file}"
+                )
+                df = df.copy()
+                df["Tv2C"] = df["Tv2C"].clip(lower=self.TV2C_MIN)
+        df.to_csv(output_path, sep='\t', index=False, na_rep='NaN')
         print(f"Exported formatted CTD to {output_path}")
 
 def process_raw_data(df, ctd_type):
@@ -495,32 +524,130 @@ def correct_chla_offset_and_pressure(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
-def identify_downcast(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
+def identify_downcast(df: pd.DataFrame, ctd_type: str, smoothing_window: int = 10) -> pd.DataFrame:
     """
-    Identify downcast portion of profile.
+    Identify downcast vs upcast portions of profile(s) based on depth/pressure trends.
+    Handles multiple casts in a single profile by detecting depth gradients.
     
     Args:
         df: DataFrame containing CTD data
         ctd_type: Type of CTD ('idronaut' or 'seabird')
+        smoothing_window: Window size for smoothing depth data to detect trends (default: 10)
         
     Returns:
-        DataFrame with added 'is_downcast' column
+        DataFrame with added 'is_downcast' column (True=downcast, False=upcast, None=unclear)
     """
     # Check for depth or pressure in standardized column names
     if 'depth_m' in df.columns:
         depth_col = 'depth_m'
-    else:
+    elif 'pressure_dbar' in df.columns:
         depth_col = 'pressure_dbar'
-    
-    if depth_col not in df.columns:
+    else:
         raise ValueError(
             f"Could not find depth or pressure column\n"
             f"Available columns: {df.columns.tolist()}"
         )
     
-    max_depth_idx = df[depth_col].idxmax()
-    df["is_downcast"] = df.index <= max_depth_idx
+    # Create a copy of depth data
+    depth_data = df[depth_col].copy()
     
+    # Ensure depth data is numeric
+    depth_data = pd.to_numeric(depth_data, errors='coerce')
+    
+    # Handle NaN values with forward/backward fill
+    depth_data = depth_data.ffill().bfill()
+    
+    if depth_data.isna().all():
+        print("Warning: All depth values are non-numeric or NaN. Setting all to None.")
+        df['is_downcast'] = None
+        return df
+    
+    # Convert to absolute values (depth/pressure should be positive)
+    depth_data = np.abs(depth_data)
+    
+    # Smooth the depth data to reduce noise
+    if len(depth_data) > smoothing_window:
+        smoothed_depth = uniform_filter1d(depth_data.values.astype(float), size=smoothing_window, mode='nearest')
+    else:
+        smoothed_depth = depth_data.values
+    
+    # Calculate depth gradient (rate of change)
+    if len(smoothed_depth) < 2:
+        print("Warning: Not enough depth data to calculate gradient. Setting all to None.")
+        df['is_downcast'] = None
+        return df
+    depth_gradient = np.gradient(smoothed_depth)
+    
+    # Initialize is_downcast array with None
+    is_downcast = np.full(len(df), None, dtype=object)
+    
+    # Use a rolling window to determine local trend
+    window_size = max(smoothing_window, 20)  # At least 20 points for trend detection
+    half_window = window_size // 2
+    
+    # Vectorized gradient calculation for windows
+    for i in range(len(depth_gradient)):
+        start_idx = max(0, i - half_window)
+        end_idx = min(len(depth_gradient), i + half_window + 1)
+        
+        # Calculate average gradient in this window
+        window_gradient = np.mean(depth_gradient[start_idx:end_idx])
+        
+        # Threshold for determining trend (in meters/dbar per sample)
+        gradient_threshold = 0.001  # Small threshold to handle nearly flat sections
+        
+        if window_gradient > gradient_threshold:
+            is_downcast[i] = True  # Depth increasing = downcast
+        elif window_gradient < -gradient_threshold:
+            is_downcast[i] = False  # Depth decreasing = upcast
+        # else: leave as None for unclear/flat sections
+    
+    # Convert to pandas Series for easier manipulation
+    is_downcast_series = pd.Series(is_downcast, index=df.index)
+    
+    # Fill small gaps (up to 10 points) where both neighbors agree
+    gap_size = 10
+    for i in range(1, len(is_downcast_series) - 1):
+        if pd.isna(is_downcast_series.iloc[i]):
+            # Look backwards for nearest non-null value
+            prev_val = None
+            for j in range(i - 1, max(-1, i - gap_size - 1), -1):
+                if not pd.isna(is_downcast_series.iloc[j]):
+                    prev_val = is_downcast_series.iloc[j]
+                    break
+            
+            # Look forwards for nearest non-null value
+            next_val = None
+            for j in range(i + 1, min(len(is_downcast_series), i + gap_size + 1)):
+                if not pd.isna(is_downcast_series.iloc[j]):
+                    next_val = is_downcast_series.iloc[j]
+                    break
+            
+            # Fill if both neighbors agree
+            if prev_val is not None and next_val is not None and prev_val == next_val:
+                is_downcast_series.iloc[i] = prev_val
+    
+    # If we still have too many None values, use fallback strategy
+    non_null_count = is_downcast_series.count()
+    total_count = len(is_downcast_series)
+    
+    if non_null_count > 0 and non_null_count < total_count * 0.5:  # Less than 50% classified
+        # Use the most common classification for the whole profile
+        most_common = is_downcast_series.mode()
+        if len(most_common) > 0:
+            default_value = most_common.iloc[0]
+            print(f"Low classification rate ({non_null_count}/{total_count}). Using default: {default_value}")
+            is_downcast_series = is_downcast_series.fillna(default_value)
+    
+    df['is_downcast'] = is_downcast_series
+
+    # Final pass: propagate nearest known True/False to any remaining None sections
+    # (covers flat segments missed by the small-gap filler and the 50% fallback)
+    df['is_downcast'] = df['is_downcast'].ffill().bfill()
+    # If the entire column is still None (e.g. no gradient at all), use explicit NaN
+    if df['is_downcast'].isna().all():
+        df['is_downcast'] = np.nan
+
     return df
 
 def quality_check_ph(df: pd.DataFrame, ctd_type: str) -> pd.DataFrame:
@@ -618,10 +745,14 @@ def quality_check_oxygen(df: pd.DataFrame, ctd_type: str,
 def find_mld(temp, dens, depth, thresh_temp=0.2, thresh_dens=0.03, thresh_depth=1):
     """Calculate mixed layer depth using temperature and density criteria."""
 
-    #Filter depth > 1, adjust temp, dens 
+    #Filter depth > 1, adjust temp, dens
     temp = temp[depth > thresh_depth]
     dens = dens[depth > thresh_depth]
     depth = depth[depth > thresh_depth]
+
+    # Not enough data after depth filter
+    if temp.empty or dens.empty:
+        return pd.Series({'mld_temp': np.nan, 'mld_dens': np.nan})
 
     temp_surf = temp.iloc[0]
     dens_surf = dens.iloc[0]
