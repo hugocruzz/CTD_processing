@@ -1,0 +1,138 @@
+{
+  "comment" : "",
+  "version" : {
+    "file" : "1.0.0",
+    "ruskin" : "2.25.0"
+  },
+  "export" : {
+    "exporttime" : "2026-03-24 16:21:26.028",
+    "starttime" : "2026-03-24 08:51:33.000",
+    "endtime" : "2026-03-24 16:18:22.625"
+  },
+  "instrument" : {
+    "serial" : 236825,
+    "model" : "RBRconcerto³",
+    "fwtype" : 104,
+    "fwversion" : "1.160"
+  },
+  "dataheader" : [ {
+    "index" : 1,
+    "name" : "Time",
+    "format" : "yyyy-MM-dd HH:mm:ss.SSS"
+  }, {
+    "index" : 1,
+    "name" : "Conductivity",
+    "units" : "mS/cm",
+    "calibration" : {
+      "time" : "2025-12-13 21:23:13.000",
+      "C0" : 0.026766183,
+      "C1" : 157.65128,
+      "C2" : 1.0,
+      "X0" : 4.5333424E-4,
+      "X1" : -2.1895836E-5,
+      "X2" : 6.0E-7,
+      "X3" : 0.0,
+      "X4" : 0.0,
+      "X5" : 14.969578,
+      "X6" : 10.0
+    }
+  }, {
+    "index" : 2,
+    "name" : "Temperature",
+    "units" : "Degrees_C",
+    "calibration" : {
+      "time" : "2025-12-05 14:28:35.000",
+      "C0" : 0.0033985854,
+      "C1" : -2.566303E-4,
+      "C2" : 2.438755E-6,
+      "C3" : -8.355779E-8
+    }
+  }, {
+    "index" : 3,
+    "name" : "Pressure",
+    "units" : "dbar",
+    "sensor" : "N009950",
+    "calibration" : {
+      "time" : "2025-12-10 20:09:05.000",
+      "C0" : -28.677416,
+      "C1" : 2341.233,
+      "C2" : 31.85811,
+      "C3" : -27.720364,
+      "X0" : 9.8874,
+      "X1" : 0.068065,
+      "X2" : 3.4868283E-6,
+      "X3" : -1.7315223E-6,
+      "X4" : -1.0454E-4,
+      "X5" : 21.021032
+    }
+  }, {
+    "index" : 4,
+    "name" : "Temperature",
+    "units" : "Degrees_C",
+    "calibration" : {
+      "time" : "2000-04-01 00:00:00.000",
+      "C0" : 0.0,
+      "C1" : 838.8608
+    }
+  }, {
+    "index" : 5,
+    "name" : "Dissolved O2 concentration",
+    "units" : "umol/L",
+    "sensor" : "234863",
+    "calibration" : {
+      "time" : "2000-04-01 00:00:00.000",
+      "C0" : 0.0,
+      "C1" : 838.8608,
+      "C2" : 1.063E-5
+    }
+  }, {
+    "index" : 6,
+    "name" : "Sea pressure",
+    "units" : "dbar"
+  }, {
+    "index" : 7,
+    "name" : "Depth",
+    "units" : "m"
+  }, {
+    "index" : 8,
+    "name" : "Salinity",
+    "units" : "PSU"
+  }, {
+    "index" : 9,
+    "name" : "Speed of sound",
+    "units" : "m/s"
+  }, {
+    "index" : 10,
+    "name" : "Specific conductivity",
+    "units" : "uS/cm"
+  }, {
+    "index" : 11,
+    "name" : "Dissolved O2 saturation",
+    "units" : "%"
+  }, {
+    "index" : 14,
+    "name" : "Density anomaly",
+    "units" : "kg/m3"
+  } ],
+  "schedule" : {
+    "loggertime" : "2026-03-24 13:23:43.595",
+    "starttime" : "2000-01-01 01:00:00.000",
+    "endtime" : "2100-01-01 00:59:59.000"
+  },
+  "sampling" : {
+    "mode" : "continuous",
+    "castdetection" : "on",
+    "period" : "125"
+  },
+  "parameters" : {
+    "atmpressure" : 10.1325,
+    "density" : 1.0281,
+    "altitude" : 0.0,
+    "temperature" : 15.0,
+    "pressure" : 10.1325,
+    "conductivity" : 42.914,
+    "salinity" : 35.0,
+    "spec_cond_coeff" : 0.0191,
+    "offsetfromutc" : 0.0
+  }
+}
