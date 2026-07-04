@@ -5,7 +5,6 @@ import pandas as pd
 from scipy.signal import find_peaks, savgol_filter
 from readers import IdronautReader, SeabirdReader, RBRReader, ExoReader, GF23Reader, RBRruskinReader
 from processors import process_raw_data
-from visualize import create_profile_plot
 from processors import process_raw_data, CTDFormatter
 import shutil
 

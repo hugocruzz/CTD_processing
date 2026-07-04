@@ -1,0 +1,7 @@
+gsw
+numpy
+pandas
+pyrsktools
+scipy
+seawater
+xarray
